@@ -39,10 +39,12 @@ class SlicerConfig:
 
     center_of_mass: ndarray = None
     length: float = None
+    center: ndarray = None
 
 @dataclass(frozen=True)
 class SlicerState:
-    clippers: vtkClipPolyData
+    clippers: Tuple[vtkClipPolyData]
+    centers: Tuple[ndarray]
 
 class NewSlicer:       
     def __init__(self, config: SlicerConfig) -> None:
@@ -53,9 +55,10 @@ class NewSlicer:
             self.number_of_slices,
             self.center_of_mass,
             self.length,
+            self.center,
         )
         self._state_change = True
-        self._clippers: Tuple[vtkClipPolyData]
+        self._state: SlicerState = None
 
     def calculate_length_in_direction(self, direction: ndarray):
         minimum_projection = Infinity
@@ -98,11 +101,7 @@ class NewSlicer:
 
         return self.calculate_length_in_direction(self.direction)
 
-    @property
-    def clippers(self) -> Tuple[vtkClipPolyData]:
-        if not self._state_change:
-            return self._clippers
-
+    def update(self) -> None:
         clippers = tuple(self.make_inverse_clipper() for _ in range(self.number_of_slices - 1))
 
         # setup cutting planes
@@ -114,15 +113,38 @@ class NewSlicer:
             plane.SetNormal(self.direction)
             clipper.SetClipFunction(plane)
 
+        # setup sub-geometry centers
+        start = self.center - self.length * self.direction / 2.0
+        centers = tuple(start + (n + 0.5) * step for n in range(self.number_of_slices))
+
         # setup chain
         clippers[0].SetInputData(self.input_data)
         for previous_clipper, next_clipper in zip(clippers, clippers[1:]):
             next_clipper.SetInputConnection(previous_clipper.GetClippedOutputPort())
         clippers[-1].Update()
 
-        self._clippers = clippers
+        self._state = SlicerState(clippers, centers)
         self._state_change = False
         return clippers
+
+
+    @property
+    def clippers(self) -> Tuple[vtkClipPolyData]:
+        if self._state_change:
+            self.update()
+
+        return self._state.clippers
+
+    @property
+    def centers(self) -> Tuple[ndarray]:
+        if self._state_change:
+            self.update()
+
+        return self._state.centers
+
+    @property
+    def center(self) -> ndarray:
+        return self.center_of_mass if self.config.center is None else self.config.center
 
     @property
     def input_data(self) -> vtkPolyData:
@@ -160,16 +182,17 @@ class NewSlicer:
         number_of_slices: int,
         center_of_mass: ndarray = None,
         length: float = None,
+        center: ndarray = None,
     ) -> NewSlicer:
         config = SlicerConfig(
-            input_data, direction, number_of_slices, center_of_mass, length
+            input_data, direction, number_of_slices, center_of_mass, length, center
         )
         return NewSlicer(config)
 
 def slice_geometry(geometry: vtkPolyData, axes: Tuple[ndarray], number_of_slices: int) -> Tuple[vtkPolyData]:
     def slice_rec(slicer, axes, lengths):
         if len(axes) == 0:
-            return slicer.output
+            return tuple(zip(slicer.output, slicer.centers))
 
         current_axis, *remaining_axes = axes
         current_length, *remaining_lengths = lengths
@@ -180,8 +203,9 @@ def slice_geometry(geometry: vtkPolyData, axes: Tuple[ndarray], number_of_slices
                 number_of_slices=slicer.number_of_slices,
                 center_of_mass=slicer.center_of_mass,
                 length=current_length,
+                center=sub_center,
             ) 
-            for sub_geometry in slicer.output
+            for sub_geometry, sub_center in zip(slicer.output, slicer.centers)
         )
 
         return reduce(
@@ -221,14 +245,21 @@ def main() -> None:
     )
     #slices = flatten_nested_slices(slice_rec(vertebra, number_of_cuts=2, axes=(array((1,0,0,)), array((0,1,0,)), array((0,0,1,)),)))
 
-    print("Total: ", vertebra.GetNumberOfPoints())
+    centers = list()
     writer = vtkSTLWriter()
     for no, slice_ in zip(count(1), slices):
-        if slice_.GetNumberOfPoints() < 1:
+        geometry, center = slice_
+        if geometry.GetNumberOfPoints() < 1:
             continue
+        centers.append(center)
         writer.SetFileName(f'../data/simple.{no}.stl')
-        writer.SetInputData(slice_)
+        writer.SetInputData(geometry)
         writer.Update()
+
+    with open('../data/centers_template.mrk.json', 'r') as template:
+        file_content = str().join(template.readlines()) % tuple(f'[{_1}, {_2}, {_3}]' for _1, _2, _3 in centers)
+    with open('../data/centers.mrk.json', 'w') as out_file:
+        out_file.write(file_content)
 
 if __name__ == '__main__':
     main()
