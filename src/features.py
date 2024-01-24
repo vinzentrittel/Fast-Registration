@@ -3,13 +3,14 @@ from dataclasses import dataclass
 from functools import reduce
 from typing import Tuple
 
-from numpy import abs, argmax, array, dot, inf as Infinity, ndarray, outer
+from numpy import abs, argmax, array, dot, inf as Infinity, newaxis, ndarray, outer, zeros
 from numpy.linalg import norm
 from vtk import (
     vtkPolyData,
     vtkClipPolyData,
     vtkCenterOfMass,
     vtkIdList,
+    vtkOBBTree,
     vtkPlane,
 )
 from vtk.util.numpy_support import vtk_to_numpy
@@ -51,7 +52,7 @@ class SlicerState:
     clippers: Tuple[vtkClipPolyData]
     centers: Tuple[ndarray]
 
-class Slicer:       
+class Slicer:
     """
     Algorithm class to slice divide a vtkPolyData geometry into a number
     of pieces.
@@ -251,7 +252,7 @@ class Slicer:
         center_of_mass_filter.SetInputData(geometry)
         center_of_mass_filter.Update()
         center_of_mass = center_of_mass_filter.GetCenter()
-        
+
         return array(center_of_mass)
 
     @classmethod
@@ -289,52 +290,71 @@ class Cube:
     normal: ndarray
     point: ndarray
 
-class Asdgasg:
+class Voxelizer:
     SlicesPerDimension = 3
     NumberOfCubes = 3 * 3 * 3
 
-    def __init__(self, geometry: vtkPolyData, *axes: Tuple[ndarray]) -> None:
-        slicing_data = slice_geometry(geometry, axes=axes, number_of_slices=self.SlicesPerDimension)
+    def __init__(self, geometry: vtkPolyData) -> None:
+        self.directions: ndarray
+        self.axes: ndarray
+        self.center_of_mass: ndarray
+        self.directions: ndarray
+        self._points: ndarray
+        self._cubes: Tuple[Cube]
+
+        self.create_cubes(geometry)
+
+    def create_cubes(self, geometry: vtkPolyData) -> None:
+        self.directions = self.calc_obb(geometry)[1:]
+        direction_vector_lengths = norm(self.directions, axis=1)
+        self.axes = self.directions / direction_vector_lengths[:, newaxis]
+        #self.axes = [axis / norm(axis) for axis in self.directions]
+        self.center_of_mass = Slicer.calculate_center_of_mass(geometry)
+
+        slicing_data = slice_geometry(geometry, axes=self.axes, number_of_slices=self.SlicesPerDimension)
         geometries, centers = zip(*slicing_data)
+        self.directions = self.calculate_directions(self.center_of_mass, targets=centers)
+        self._points = array([
+            self.calculate_projections(g, origin=self.center_of_mass, direction=d).tolist()
+            for g, d in slicing_data
+        ])
 
-        center_of_mass = Slicer.calculate_center_of_mass(geometry)
-        self.directions = self.calculate_directions(center_of_mass, targets=centers)
+        self._cubes = tuple(Cube(*parameters) for parameters in zip(
+            geometries, centers, self.directions, self._points
+        ))
 
-        # test
-        with open('../data/centers_template.mrk.json', 'r') as template:
-            file_content = str().join(template.readlines()) % tuple(
-                f'[{x}, {y}, {z}]'
-                for x, y, z in [
-                    self.calculate_projections(g, origin=center_of_mass, direction=d).tolist()
-                    for g, d in zip(geometries, self.directions)
-                ]
-            )
-        with open('../data/centers_template.mrk.json', 'r') as template:
-            _file_content = str().join(template.readlines()) % tuple(
-                f'[{x}, {y}, {z}]'
-                for x, y, z in centers
-            )
-        with open('../data/centers.mrk.json', 'w') as out_file:
-            out_file.write(file_content)
-        """
-        """
+    @property
+    def cubes(self) -> Tuple[Cube]:
+        return self._cubes
 
-        self.cubes: Tuple[Cube]
+    @property
+    def points(self) -> ndarray:
+        return self._points
+
+    @classmethod
+    def make_normalized(cls, voxelizer: Voxelizer) -> Voxelizer:
+        return cls()
 
     @staticmethod
     def calculate_directions(origin: ndarray, targets: Tuple[ndarray]) -> Tuple[ndarray]:
-        return tuple((array(targets) - origin).tolist())
+        vectors = array(targets - origin)
+        lengths = norm(vectors, axis=1)
+        normals = vectors / lengths[:, newaxis]
+        return normals
 
     @classmethod
     def calculate_projections(cls, geometry: vtkPolyData, origin: ndarray, direction: ndarray) -> ndarray:
         points = cls.extract_valid_vertices(geometry)
+        if points.shape[1] == 0:
+            return array([0, 0, 0])
+
         points -= origin
         axis = direction / norm(direction)
 
         dot_products = points.dot(axis)
         projections = outer(dot_products, axis)
         maximum_projection_id = argmax(dot_products)
-        
+
         return points[0][maximum_projection_id] + origin
 
     @staticmethod
@@ -348,6 +368,20 @@ class Asdgasg:
 
         vertices = list(geometry.GetPoint(id) for id in point_ids)
         return array([vertices])
+
+    @staticmethod
+    def calc_obb(geometry: vtkPolyData) -> ndarray:
+        """
+        Return oriented bounding box as a tuple (corner, vector1, vector2, vector3,).
+        """
+        obb = zeros((5, 3))
+        obb_tree = vtkOBBTree()
+        obb_tree.SetDataSet(geometry)
+        obb_tree.SetMaxLevel(0)
+        obb_tree.BuildLocator()
+        obb_tree.ComputeOBB(geometry, *[obb[i] for i in range(5)])
+        return array(tuple(obb[i] for i in range(4)))
+
 
 def slice_geometry(geometry: vtkPolyData, axes: Tuple[ndarray], number_of_slices: int) -> Tuple[vtkPolyData]:
     """
@@ -373,7 +407,7 @@ def slice_geometry(geometry: vtkPolyData, axes: Tuple[ndarray], number_of_slices
                 center_of_mass=slicer.center_of_mass,
                 length=current_length,
                 center=sub_center,
-            ) 
+            )
             for sub_geometry, sub_center in zip(slicer.output, slicer.centers)
         )
 
@@ -404,4 +438,4 @@ def demo_3d(geometry: vtkPolyData) -> Tuple[vtkPolyData]:
     ))
 
 def demo_poc(geometry: vtkPolyData) -> None:
-    tester = Asdgasg(geometry, array([1,0,0]), array([0,1,0]), array([0,0,1]))
+    tester = Voxelizer(geometry)

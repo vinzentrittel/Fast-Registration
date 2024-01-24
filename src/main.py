@@ -8,7 +8,7 @@ from typing import Tuple
 from numpy import array
 from vtk import vtkPolyData, vtkSTLReader, vtkSTLWriter
 
-from features import slice_geometry, demo_poc
+from features import Voxelizer
 
 Tuple3PolyData = Tuple[vtkPolyData, vtkPolyData, vtkPolyData]
 
@@ -28,29 +28,14 @@ def main() -> None:
     arguments = parser.parse_args()
 
     vertebra = load_stl(filename=arguments.filename)
-    demo_poc(vertebra)
-    return
-    slices = slice_geometry(
-        vertebra,
-        axes=(array((1,0,0,)), array((0,1,0,)), array((0,0,1,)),),
-        number_of_slices=3
-    )
+    voxelization = Voxelizer(vertebra)
 
-    centers = list()
     writer = vtkSTLWriter()
-    for no, slice_ in zip(count(1), slices):
-        geometry, center = slice_
-        if geometry.GetNumberOfPoints() < 1:
-            continue
-        centers.append(center)
-        writer.SetFileName(f'../data/simple.{no}.stl')
-        writer.SetInputData(geometry)
-        writer.Update()
+    poi = voxelization.points
 
     with open('../data/centers_template.mrk.json', 'r') as template:
-        file_content = str().join(template.readlines()) % tuple(f'[{_1}, {_2}, {_3}]' for _1, _2, _3 in centers)
-    with open('../data/centers.mrk.json', 'w') as out_file:
-        out_file.write(file_content)
+        file_content = str().join(template.readlines()) % tuple(f'[{_1}, {_2}, {_3}]' for _1, _2, _3 in poi)
+    print(file_content)
 
 if __name__ == '__main__':
     main()
