@@ -9,6 +9,7 @@ from vtk import (
     vtkPolyData,
     vtkClipPolyData,
     vtkCenterOfMass,
+    vtkIdList,
     vtkPlane,
 )
 from vtk.util.numpy_support import vtk_to_numpy
@@ -308,6 +309,11 @@ class Asdgasg:
                     for g, d in zip(geometries, self.directions)
                 ]
             )
+        with open('../data/centers_template.mrk.json', 'r') as template:
+            _file_content = str().join(template.readlines()) % tuple(
+                f'[{x}, {y}, {z}]'
+                for x, y, z in centers
+            )
         with open('../data/centers.mrk.json', 'w') as out_file:
             out_file.write(file_content)
         """
@@ -319,10 +325,9 @@ class Asdgasg:
     def calculate_directions(origin: ndarray, targets: Tuple[ndarray]) -> Tuple[ndarray]:
         return tuple((array(targets) - origin).tolist())
 
-    @staticmethod
-    def calculate_projections(geometry: vtkPolyData, origin: ndarray, direction: ndarray) -> ndarray:
-        points = vtk_to_numpy(geometry.GetPoints().GetData())
-        print(origin)
+    @classmethod
+    def calculate_projections(cls, geometry: vtkPolyData, origin: ndarray, direction: ndarray) -> ndarray:
+        points = cls.extract_valid_vertices(geometry)
         points -= origin
         axis = direction / norm(direction)
 
@@ -330,7 +335,19 @@ class Asdgasg:
         projections = outer(dot_products, axis)
         maximum_projection_id = argmax(dot_products)
         
-        return points[maximum_projection_id] + origin
+        return points[0][maximum_projection_id] + origin
+
+    @staticmethod
+    def extract_valid_vertices(geometry: vtkPolyData) -> Tuple[int]:
+        polygons: vtkCellArray = geometry.GetPolys()
+        point_ids = set()
+        new_point_ids = vtkIdList()
+        for cell_id in range(polygons.GetNumberOfCells()):
+            polygons.GetCellAtId(cell_id, new_point_ids)
+            point_ids |= set(new_point_ids.GetId(id) for id in range(new_point_ids.GetNumberOfIds()))
+
+        vertices = list(geometry.GetPoint(id) for id in point_ids)
+        return array([vertices])
 
 def slice_geometry(geometry: vtkPolyData, axes: Tuple[ndarray], number_of_slices: int) -> Tuple[vtkPolyData]:
     """
