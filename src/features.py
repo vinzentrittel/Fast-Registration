@@ -294,7 +294,7 @@ class Voxelizer:
     SlicesPerDimension = 3
     NumberOfCubes = 3 * 3 * 3
 
-    def __init__(self, geometry: vtkPolyData) -> None:
+    def __init__(self, geometry: vtkPolyData, directions: ndarray=None) -> None:
         self.directions: ndarray
         self.axes: ndarray
         self.center_of_mass: ndarray
@@ -302,13 +302,12 @@ class Voxelizer:
         self._points: ndarray
         self._cubes: Tuple[Cube]
 
-        self.create_cubes(geometry)
+        self.create_cubes(geometry, directions)
 
-    def create_cubes(self, geometry: vtkPolyData) -> None:
-        self.directions = self.calc_obb(geometry)[1:]
+    def create_cubes(self, geometry: vtkPolyData, directions: ndarray) -> None:
+        self.directions = self.calc_obb(geometry)[1:] if directions is None else directions
         direction_vector_lengths = norm(self.directions, axis=1)
         self.axes = self.directions / direction_vector_lengths[:, newaxis]
-        #self.axes = [axis / norm(axis) for axis in self.directions]
         self.center_of_mass = Slicer.calculate_center_of_mass(geometry)
 
         slicing_data = slice_geometry(geometry, axes=self.axes, number_of_slices=self.SlicesPerDimension)

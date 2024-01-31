@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from argparse import ArgumentParser
 from itertools import count
+from select import select
+from sys import stdin
 from typing import Tuple
 
 from numpy import array
@@ -18,6 +20,10 @@ def load_stl(filename: str) -> vtkPolyData:
     reader.Update()
     return reader.GetOutput()
 
+def is_there_stdin(timeout=0):
+    """Check if there's data available on stdin."""
+    return select([stdin], [], [], timeout) == ([stdin], [], [])
+
 def main() -> None:
     parser = ArgumentParser(
         prog='Axis Registration',
@@ -28,7 +34,7 @@ def main() -> None:
     arguments = parser.parse_args()
 
     vertebra = load_stl(filename=arguments.filename)
-    voxelization = Voxelizer(vertebra)
+    voxelization = Voxelizer(vertebra, array(loads(stdin.read())) if is_there_stdin() else None)
 
     writer = vtkSTLWriter()
     poi = voxelization.points
