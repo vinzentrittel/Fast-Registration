@@ -39,7 +39,7 @@ class IdentityClipper:
     my_clipper = IdentityClipper()
     my_clipper.input_data = vtkPolyData() # makes little sense, better provide
                                           # a populated vtkPolyData object
-    subsection = my_clipper.output(Axis.Left, Axis.Posterior, Axis.Inferior)
+    subsection = my_clipper(Axis.Left, Axis.Posterior, Axis.Inferior)
     """
     class FrontalLvlAxis(IntEnum):
         " Indices for first level split "
@@ -127,7 +127,7 @@ class IdentityClipper:
             for sagittal in (self.LongitudinalLvlAxis.Anterior, self.LongitudinalLvlAxis.Center, self.LongitudinalLvlAxis.Posterior,):
                 self.subclippers[frontal][sagittal][self.LongitudinalLvlAxis.Superior].Update()
 
-    def output(self, frontal: Axis, sagittal: Axis, longitudinal: Axis) -> Tuple[vtkPolyData]:
+    def __call__(self, frontal: Axis, sagittal: Axis, longitudinal: Axis) -> Tuple[vtkPolyData]:
         """
         Return the subsection described by the 3 axes values.
 
@@ -137,7 +137,7 @@ class IdentityClipper:
         longitudinal - inferior, superior or center subsection - see Axis enum (-1, 1, 0)
 
         Usage:
-        identity_clipper.output(Axis.Center, Axis.Center, Axis.Inferior)
+        identity_clipper(Axis.Center, Axis.Center, Axis.Inferior)
         """
         clippers = self.subclippers[frontal][sagittal]
         if longitudinal == Axis.Inferior:
@@ -281,7 +281,7 @@ def demo() -> vtkPolyData:
     Clipper = IdentityClipper()
     Clipper.input_data = load_stl("../data/L5_normalized.stl")
 
-    return Clipper.output(Axis.Center, Axis.Center, Axis.Center)
+    return Clipper(Axis.Center, Axis.Center, Axis.Center)
 
 if __name__ == "__main__":
     demo()
