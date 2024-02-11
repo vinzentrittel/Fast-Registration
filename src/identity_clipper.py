@@ -127,7 +127,7 @@ class IdentityClipper:
             for sagittal in (self.LongitudinalLvlAxis.Anterior, self.LongitudinalLvlAxis.Center, self.LongitudinalLvlAxis.Posterior,):
                 self.subclippers[frontal][sagittal][self.LongitudinalLvlAxis.Superior].Update()
 
-    def __call__(self, frontal: Axis, sagittal: Axis, longitudinal: Axis) -> Tuple[vtkPolyData]:
+    def __call__(self, frontal: Axis, sagittal: Axis, longitudinal: Axis) -> vtkPolyData:
         """
         Return the subsection described by the 3 axes values.
 
