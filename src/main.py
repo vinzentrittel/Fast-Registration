@@ -5,10 +5,11 @@ from argparse import ArgumentParser
 from itertools import count
 from typing import Tuple
 
-from numpy import array
-from vtk import vtkPolyData, vtkSTLReader, vtkSTLWriter
+from numpy import array, identity
+from vtk import vtkPolyData, vtkSTLReader, vtkSTLWriter, vtkMatrix4x4, vtkTransform, vtkTransformPolyDataFilter
 
 from features import Voxelizer
+from rotation_factory import RotationFactory
 
 Tuple3PolyData = Tuple[vtkPolyData, vtkPolyData, vtkPolyData]
 
@@ -18,6 +19,12 @@ def load_stl(filename: str) -> vtkPolyData:
     reader.Update()
     return reader.GetOutput()
 
+def save_stl(geometry: vtkPolyData, filename: str) -> vtkPolyData:
+    writer = vtkSTLWriter()
+    writer.SetFileName(filename)
+    writer.SetInputData(geometry)
+    writer.Update()
+
 def main() -> None:
     parser = ArgumentParser(
         prog='Axis Registration',
@@ -26,8 +33,20 @@ def main() -> None:
 
     parser.add_argument('filename')
     arguments = parser.parse_args()
+    vertebra = load_stl(arguments.filename)
+    for id_, rotation_matrix in enumerate(RotationFactory.Rotations):
+        rotation_matrix_4x4 = identity(4)
+        rotation_matrix_4x4[:3, :3] = rotation_matrix
+        transform = vtkTransform()
+        transform.SetMatrix(rotation_matrix_4x4.flatten())
+        transform_filter =  vtkTransformPolyDataFilter()
+        transform_filter.SetTransform(transform)
+        transform_filter.SetInputData(vertebra)
+        transform_filter.Update()
 
-    vertebra = load_stl(filename=arguments.filename)
+        save_stl(transform_filter.GetOutput(), f'{arguments.filename[:-4]}.{id_}.stl')
+
+    return
     voxelization = Voxelizer(vertebra)
 
     writer = vtkSTLWriter()

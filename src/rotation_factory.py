@@ -1,7 +1,7 @@
 from scipy.spatial.transform import Rotation
 from numpy import apply_along_axis, arange, array, isclose, ndarray, newaxis, sort
 
-from identity_clipper import Axis
+from axis import AxisValue, Converter as AxisConverter
 
 class RotationFactory:
     """
@@ -10,9 +10,9 @@ class RotationFactory:
     find the current subcube location axes.
 
     Usage:
-    current_frontal = Axis.Left
-    current_sagittal = Axis.Posterior
-    current_longitudinal = Axis.Inferior
+    current_frontal = AxisValue.Left
+    current_sagittal = AxisValue.Posterior
+    current_longitudinal = AxisValue.Inferior
     n: int = ... # index to your 3x3 rotation matrix of interest
     transform_matrix = RotationFactory.Rotations[n]
     # ...
@@ -33,12 +33,7 @@ class RotationFactory:
     Rotations: ndarray
 
     _RotationOrder = arange(24)[:, newaxis]
-    _SectionPoints = array(tuple(
-        (frontal, sagittal, longitudinal,)
-        for frontal in (Axis.Left, Axis.Center, Axis.Right,)
-        for sagittal in (Axis.Posterior, Axis.Center, Axis.Anterior,)
-        for longitudinal in (Axis.Inferior, Axis.Center, Axis.Superior,)
-    ))
+    _SectionPoints = array(AxisConverter.AxisConstellations)
     _StartConfigurations = array(tuple(
             Rotation.from_rotvec(n * array([0, 1, 0]), degrees=True).as_matrix()
             for n in (0, 90, 180, 270,)
@@ -57,6 +52,18 @@ class RotationFactory:
 
     @classmethod
     def correspondence_from_rotations(cls, points: ndarray) -> ndarray:
+        """
+        For a set of 27 3d points, calculate all possible rotations.
+        The resulting points will be rearranged. So that the new values
+        lays in the correct subcube. Note: this will only work, if the
+        original values were also in the correct subcube.
+
+        For the order, visit: src/axis.py
+
+        Arguments:
+        points - numpy.ndarray of shape = (27, 3,), representing
+                 a 3d point cloud.
+        """
         points = cls._rotate(points)
         return points[cls._RotationOrder, cls._CorrespondenceOrder]
 
@@ -73,7 +80,7 @@ class RotationFactory:
 
     @classmethod
     def _make_correspondence_order(cls, new_locations: ndarray) -> ndarray:
-        result = apply_along_axis(cls.axes_to_index, 2, new_locations).argsort()
+        result = apply_along_axis(AxisConverter.to_index, 2, new_locations).argsort()
         return result
 
     @classmethod
@@ -97,7 +104,7 @@ class RotationFactory:
     @staticmethod
     def _calc_section(point: ndarray) -> ndarray:
         """
-        Return the Axis indices for a given one-dimensionam
+        Return the axis indices for a given one-dimensionam
         ndarray.
         """
         def calc_section_1d(value):
@@ -109,18 +116,6 @@ class RotationFactory:
 
         return array(tuple(map(calc_section_1d, point)))
 
-    @staticmethod
-    def axes_to_index(axes: ndarray) -> int:
-        """
-        Return index for RotationFactory._RotatedLocations based on the origin
-        location axis constellation.
-        """
-        return 9 * axes[0] + 3 * axes[1] + axes[2] + 13
-
-
 RotationFactory.Rotations = RotationFactory._make_rotations()
 RotationFactory._RotatedLocations = RotationFactory._make_location_correspondences()
 RotationFactory._CorrespondenceOrder = RotationFactory._make_correspondence_order(RotationFactory._RotatedLocations)
-
-if __name__ == '__main__':
-    print(RotationFactory.correspondence_from_rotations(RotationFactory._SectionPoints))

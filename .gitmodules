@@ -1,0 +1,3 @@
+[submodule "lib/slic3r-display"]
+	path = lib/slic3r-display
+	url = https://github.com/vinzentrittel/slic3r-display.git

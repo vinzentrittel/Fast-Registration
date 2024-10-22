@@ -1,32 +1,20 @@
 from enum import IntEnum
+from typing import Tuple
 
-from numpy import array, ndarray
+from numpy import array, ndarray, isclose, newaxis
 from numpy.linalg import norm
 
-class RayFactory:
-    class Axis(IntEnum):
-        Center = 0
-        Left = -1
-        Right = 1
-        Posterior = -1
-        Anterior = 1
-        Inferior = -1
-        Superior = 1
+from axis import Converter as AxisConverter
 
-    @classmethod
-    def make_ray(cls, frontal: Axis, sagittal: Axis, longitudinal: Axis) -> ndarray:
-        ray = cls.make_default_point(frontal, sagittal, longitudinal)
-        length = norm(ray)
-        if length != 0.0:
-            return ray / length
-        else:
-            return ray
+def _make_default_rays() -> ndarray:
+    offsets = _make_default_points()
+    lengths = norm(offsets, axis=-1)[:, newaxis]
+    lengths[lengths == 0.0] = 1.0
+    return offsets / lengths
 
-    @classmethod
-    def make_default_point(cls, frontal: Axis, sagittal: Axis, longitudinal: Axis) -> ndarray:
-        return array([
-            frontal * 1./3.,
-            sagittal * 1./3.,
-            longitudinal * 1./3.,
-        ])
+def _make_default_points() -> ndarray:
+    return array(1.0/3.0 * array(AxisConverter.AxisConstellations))
+
+DefaultPoints = _make_default_points()
+DefaultRays = _make_default_rays()
 

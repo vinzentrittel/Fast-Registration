@@ -12,21 +12,12 @@ from plane_factory import (
     AnteriorPlane,
     InferiorPlane,
     LeftPlane,
-    PlaneFactory,
+    make_plane,
     PosteriorPlane,
     RightPlane,
     SuperiorPlane,
 )
-
-class Axis(IntEnum):
-    """ Enum to target all body axes and there center. """
-    Center = 0
-    Left = -1
-    Right = 1
-    Posterior = -1
-    Anterior = 1
-    Inferior = -1
-    Superior = 1
+from axis import AxisValue, Converter as AxisConverter
 
 class IdentityClipper:
     """
@@ -39,46 +30,48 @@ class IdentityClipper:
     my_clipper = IdentityClipper()
     my_clipper.input_data = vtkPolyData() # makes little sense, better provide
                                           # a populated vtkPolyData object
-    subsection = my_clipper(Axis.Left, Axis.Posterior, Axis.Inferior)
+    subsection = my_clipper(AxisValue.Left, AxisValue.Posterior, AxisValue.Inferior)
     """
     class FrontalLvlAxis(IntEnum):
         " Indices for first level split "
-        Left = 0
-        Right = 1
-        Slices = 2
+        LEFT = 0
+        RIGHT = 1
+        SLICES = 2
 
     class SagittalLvlAxis(IntEnum):
         " Indices for second level split "
-        Left = -1
-        Right = 1
-        Posterior = 0
-        Anterior = 1
-        Center = 0
-        Slices = 3
+        LEFT = -1
+        RIGHT = 1
+        POSTERIOR = 0
+        ANTERIOR = 1
+        CENTER = 0
+        SLICES = 3
 
     class LongitudinalLvlAxis(IntEnum):
         " Indices for third level split "
-        Left = -1
-        Right = 1
-        Posterior = -1
-        Anterior = 1
-        Inferior = 0
-        Superior = 1
-        Center = 0
-        Slices = 3
+        LEFT = -1
+        RIGHT = 1
+        POSTERIOR = -1
+        ANTERIOR = 1
+        INFERIOR = 0
+        SUPERIOR = 1
+        CENTER = 0
+        SLICES = 3
 
     def __init__(self):
         " Constructor "
-        NumberOfCuttingPlanes = 6
-        self.base_clipper: vtkClipPolyData    
+        number_of_cutting_planes = 6
+        self.base_clipper: vtkClipPolyData
         self.subclippers: List[List[List[vtkClipPolyData]]]
-        self.planes = tuple(PlaneFactory.make_plane(axis) for axis in range(NumberOfCuttingPlanes))
+        self.planes = tuple(
+            make_plane(axis) for axis in range(number_of_cutting_planes)
+        )
         self.setup_subclippers()
 
     def setup_subclippers(self) -> None:
         """
-        A construct is setup. That construct consists of two plane at -0.33.. and 0.33.. per dimension. Their normals
-        are identical to the world axis.
+        A construct is setup. That construct consists of two plane at -0.33.. and 0.33..
+        per dimension. Their normals are identical to the world axis.
         The VTK pipeline dictates 18 vtkClipPolyData objects to represent all neccessary cuts.
         """
         # create clippers
@@ -87,8 +80,8 @@ class IdentityClipper:
         longitudinal_clippers = self.make_longitudinal_clippers()
 
         # setup clippers
-        frontal_clippers[self.FrontalLvlAxis.Right].SetInputConnection(
-            frontal_clippers[self.FrontalLvlAxis.Left].GetClippedOutputPort()
+        frontal_clippers[self.FrontalLvlAxis.RIGHT].SetInputConnection(
+            frontal_clippers[self.FrontalLvlAxis.LEFT].GetClippedOutputPort()
         )
         self.setup_sagittal_clippers(
             sagittal_clippers, frontal_clippers=frontal_clippers
@@ -98,7 +91,7 @@ class IdentityClipper:
         )
 
         # store clippers
-        self.base_clipper = frontal_clippers[self.FrontalLvlAxis.Left]
+        self.base_clipper = frontal_clippers[self.FrontalLvlAxis.LEFT]
         self.subclippers = longitudinal_clippers
 
     @property
@@ -123,30 +116,46 @@ class IdentityClipper:
         is called automatically. If that object is modified, you may need
         to manually call update() again.
         """
-        for frontal in (self.LongitudinalLvlAxis.Left, self.LongitudinalLvlAxis.Center, self.LongitudinalLvlAxis.Right,):
-            for sagittal in (self.LongitudinalLvlAxis.Anterior, self.LongitudinalLvlAxis.Center, self.LongitudinalLvlAxis.Posterior,):
-                self.subclippers[frontal][sagittal][self.LongitudinalLvlAxis.Superior].Update()
+        for frontal in (
+            self.LongitudinalLvlAxis.LEFT,
+            self.LongitudinalLvlAxis.CENTER,
+            self.LongitudinalLvlAxis.RIGHT,
+        ):
+            for sagittal in (
+                self.LongitudinalLvlAxis.ANTERIOR,
+                self.LongitudinalLvlAxis.CENTER,
+                self.LongitudinalLvlAxis.POSTERIOR,
+            ):
+                self.subclippers[frontal][sagittal][self.LongitudinalLvlAxis.SUPERIOR].Update()
 
-    def __call__(self, frontal: Axis, sagittal: Axis, longitudinal: Axis) -> vtkPolyData:
+    def __len__(self) -> int:
+        return len(AxisConverter.AxisConstellations)
+
+    def __getitem__(self, index: int) -> vtkClipPolyData:
+        return self(*AxisConverter.from_index(index))
+
+    def __call__(
+        self, frontal: AxisValue, sagittal: AxisValue, longitudinal: AxisValue
+    ) -> vtkPolyData:
         """
         Return the subsection described by the 3 axes values.
 
         Arguments:
-        frontal - left, right or center subsection - see Axis enum (-1, 1, 0)
-        sagittal - posterior, anterior or center subsection - see Axis enum (-1, 1, 0)
-        longitudinal - inferior, superior or center subsection - see Axis enum (-1, 1, 0)
+        frontal - left, right or center subsection - see AxisValue enum (-1, 1, 0)
+        sagittal - posterior, anterior or center subsection - see AxisValue enum (-1, 1, 0)
+        longitudinal - inferior, superior or center subsection - see AxisValue enum (-1, 1, 0)
 
         Usage:
-        identity_clipper(Axis.Center, Axis.Center, Axis.Inferior)
+        identity_clipper(AxisValue.Center, AxisValue.Center, AxisValue.Inferior)
         """
         clippers = self.subclippers[frontal][sagittal]
-        if longitudinal == Axis.Inferior:
-            return clippers[self.LongitudinalLvlAxis.Inferior].GetOutput()
-        if longitudinal == Axis.Center:
-            return clippers[self.LongitudinalLvlAxis.Superior].GetOutput()
-        if longitudinal == Axis.Superior:
-            return clippers[self.LongitudinalLvlAxis.Superior].GetClippedOutput()
-
+        match longitudinal:
+            case AxisValue.Inferior:
+                return clippers[self.LongitudinalLvlAxis.INFERIOR].GetOutput()
+            case AxisValue.Center:
+                return clippers[self.LongitudinalLvlAxis.SUPERIOR].GetOutput()
+            case AxisValue.Superior:
+                return clippers[self.LongitudinalLvlAxis.SUPERIOR].GetClippedOutput()
 
     @staticmethod
     def make_clipper(plane: vtkPlane) -> vtkClipPolyData:
@@ -176,8 +185,10 @@ class IdentityClipper:
         """
         sagittal_clippers = [2 * [None] for _ in range(3)]
         for nested_sagittal_clippers in sagittal_clippers:
-            nested_sagittal_clippers[self.SagittalLvlAxis.Posterior] = self.make_clipper(self.planes[PosteriorPlane])
-            nested_sagittal_clippers[self.SagittalLvlAxis.Anterior] = self.make_clipper(self.planes[AnteriorPlane])
+            nested_sagittal_clippers[self.SagittalLvlAxis.POSTERIOR] = \
+                self.make_clipper(self.planes[PosteriorPlane])
+            nested_sagittal_clippers[self.SagittalLvlAxis.ANTERIOR] =  \
+                self.make_clipper(self.planes[AnteriorPlane])
         return sagittal_clippers
 
     def make_longitudinal_clippers(self) -> List[List[List[vtkClipPolyData]]]:
@@ -189,8 +200,10 @@ class IdentityClipper:
         longitudinal_clippers = [[2 * [None] for _ in range(3)] for _ in range(3)]
         for nested_longitudinal_clippers in longitudinal_clippers:
             for doubly_nested_longitudinal_clippers in nested_longitudinal_clippers:
-                doubly_nested_longitudinal_clippers[self.LongitudinalLvlAxis.Inferior] = self.make_clipper(self.planes[InferiorPlane])
-                doubly_nested_longitudinal_clippers[self.LongitudinalLvlAxis.Superior] = self.make_clipper(self.planes[SuperiorPlane])
+                doubly_nested_longitudinal_clippers[self.LongitudinalLvlAxis.INFERIOR] = \
+                    self.make_clipper(self.planes[InferiorPlane])
+                doubly_nested_longitudinal_clippers[self.LongitudinalLvlAxis.SUPERIOR] = \
+                    self.make_clipper(self.planes[SuperiorPlane])
         return longitudinal_clippers
 
 
@@ -226,13 +239,13 @@ class IdentityClipper:
         cls.setup_nested_clippers(
             clippers,
             positions=(
-                cls.SagittalLvlAxis.Left,
-                cls.SagittalLvlAxis.Center,
-                cls.SagittalLvlAxis.Right,
+                cls.SagittalLvlAxis.LEFT,
+                cls.SagittalLvlAxis.CENTER,
+                cls.SagittalLvlAxis.RIGHT,
             ),
             parents=(
-                frontal_clippers[cls.FrontalLvlAxis.Left],
-                frontal_clippers[cls.FrontalLvlAxis.Right],
+                frontal_clippers[cls.FrontalLvlAxis.LEFT],
+                frontal_clippers[cls.FrontalLvlAxis.RIGHT],
             ),
         )
 
@@ -247,14 +260,14 @@ class IdentityClipper:
         Connect nested clipper output ports to another's input connections.
         """
         frontal_positions = (
-            cls.LongitudinalLvlAxis.Left,
-            cls.LongitudinalLvlAxis.Center,
-            cls.LongitudinalLvlAxis.Right,
+            cls.LongitudinalLvlAxis.LEFT,
+            cls.LongitudinalLvlAxis.CENTER,
+            cls.LongitudinalLvlAxis.RIGHT,
         )
         sagittal_positions = (
-            cls.LongitudinalLvlAxis.Posterior,
-            cls.LongitudinalLvlAxis.Center,
-            cls.LongitudinalLvlAxis.Anterior,
+            cls.LongitudinalLvlAxis.POSTERIOR,
+            cls.LongitudinalLvlAxis.CENTER,
+            cls.LongitudinalLvlAxis.ANTERIOR,
         )
         for position in frontal_positions:
             nested_sagittal_clippers = sagittal_clippers[position]
@@ -262,8 +275,8 @@ class IdentityClipper:
                 longitudinal_clippers[position],
                 positions=sagittal_positions,
                 parents=(
-                    nested_sagittal_clippers[cls.FrontalLvlAxis.Left],
-                    nested_sagittal_clippers[cls.FrontalLvlAxis.Right],
+                    nested_sagittal_clippers[cls.FrontalLvlAxis.LEFT],
+                    nested_sagittal_clippers[cls.FrontalLvlAxis.RIGHT],
                 ),
             )
 
@@ -276,12 +289,12 @@ class IdentityClipper:
 
 def demo() -> vtkPolyData:
     " Stupid little demo "
-    from main import load_stl
+    from util import load_stl
 
-    Clipper = IdentityClipper()
-    Clipper.input_data = load_stl("../data/L5_normalized.stl")
+    clipper = IdentityClipper()
+    clipper.input_data = load_stl("data/L5_normalized.stl")
 
-    return Clipper(Axis.Center, Axis.Center, Axis.Center)
+    return clipper(AxisValue.Center, AxisValue.Center, AxisValue.Center)
 
 if __name__ == "__main__":
     demo()
