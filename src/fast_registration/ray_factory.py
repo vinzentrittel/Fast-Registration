@@ -4,7 +4,7 @@ from typing import Tuple
 from numpy import array, ndarray, isclose, newaxis
 from numpy.linalg import norm
 
-from axis import Converter as AxisConverter
+from .axis import Converter as AxisConverter
 
 def _make_default_rays() -> ndarray:
     offsets = _make_default_points()

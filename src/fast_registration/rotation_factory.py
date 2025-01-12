@@ -1,7 +1,7 @@
 from scipy.spatial.transform import Rotation
 from numpy import apply_along_axis, arange, array, isclose, ndarray, newaxis, sort
 
-from axis import AxisValue, Converter as AxisConverter
+from .axis import AxisValue, Converter as AxisConverter
 
 class RotationFactory:
     """

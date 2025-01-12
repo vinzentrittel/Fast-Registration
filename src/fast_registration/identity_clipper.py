@@ -8,7 +8,7 @@ from vtk import (
     vtkSTLWriter,
 )
 
-from plane_factory import (
+from .plane_factory import (
     AnteriorPlane,
     InferiorPlane,
     LeftPlane,
@@ -17,7 +17,7 @@ from plane_factory import (
     RightPlane,
     SuperiorPlane,
 )
-from axis import AxisValue, Converter as AxisConverter
+from .axis import AxisValue, Converter as AxisConverter
 
 class IdentityClipper:
     """

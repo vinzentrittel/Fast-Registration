@@ -1,6 +1,6 @@
 from vtk import vtkPlane
 
-from axis import AxisIndex
+from .axis import AxisIndex
 
 def make_plane(axis: AxisIndex) -> vtkPlane:
     """

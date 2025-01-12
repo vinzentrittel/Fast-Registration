@@ -117,3 +117,17 @@ def _convert_points_to_table(geometry: vtkPolyData) -> vtkTable:
     table.AddColumn(y_array)
     table.AddColumn(z_array)
     return table
+
+if __name__ == "__main__":
+    from vtk.util.numpy_support import vtk_to_numpy
+    from slic3r_display import Slic3rLineRepresentable
+    from util import load_stl
+
+    geometry = load_stl("data/c7.stl")
+    axes = eigenvectors(geometry)
+
+    points = vtk_to_numpy(geometry.GetPoints().GetData())
+    mnm = [extrema(points, axes[id]).tolist() for id in range(3)]
+    Slic3rLineRepresentable.write_from(mnm, "c7.mrk.json")
+    lines = [[[0.0, 0.0, 0.0], eigenvectors(geometry, scale_by_eigenvalue=True)[id].tolist()] for id in range(3)]
+    Slic3rLineRepresentable.write_from(lines, "eigen.mrk.json")

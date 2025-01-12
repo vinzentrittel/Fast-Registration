@@ -16,8 +16,8 @@ from vtk import vtkPolyData, vtkSTLReader
 from vtk.util.numpy_support import vtk_to_numpy
 from slic3r_display import Slic3rBoxRepresentable
 
-from axis import eigenvectors, extrema
-from util import load_stl
+from .axis import eigenvectors, extrema
+from .util import load_stl
 
 @dataclass
 class BoundingBox:
