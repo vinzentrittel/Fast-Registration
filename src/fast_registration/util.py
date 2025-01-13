@@ -4,6 +4,7 @@ from typing import Any
 from numpy import multiply, ndarray, newaxis
 from slic3r_display import Slic3rBoxRepresentable, Slic3rPointRepresentable
 from vtk import (
+    vtkIterativeClosestPointTransform,
     vtkPolyData,
     vtkSTLReader,
     vtkSTLWriter,
@@ -53,3 +54,29 @@ def transform(geometry: vtkPolyData, matrix: ndarray) -> vtkPolyData:
     transform_filter.Update()
 
     return transform_filter.GetOutput()
+
+def calculate_icp_transformation(
+    source_geometry: vtkPolyData, target_geometry: vtkPolyData
+) -> vtkIterativeClosestPointTransform:
+    """
+    Calculate a transformation matrix, to rigidly register a 'source_geometry'
+    onto the position of 'target_geometry'. Transformation algorithm is the
+    iterative closest point search.
+
+    Keyword arguments:
+    source_geometry - a vtkPolyData mesh, that should be moved to align with
+                      'target_geometry'.
+    target_geometry - the destination of a 'source_geometry'
+    """
+    iterative_closest_point = vtkIterativeClosestPointTransform()
+    iterative_closest_point.SetSource(source_geometry)
+    iterative_closest_point.SetTarget(target_geometry)
+    iterative_closest_point.GetLandmarkTransform().SetModeToRigidBody()
+    iterative_closest_point.SetMaximumNumberOfLandmarks(200)
+    iterative_closest_point.SetMaximumMeanDistance(0.00001)
+    iterative_closest_point.SetMaximumNumberOfIterations(25)
+    #iterative_closest_point.CheckMeanDistanceOn()
+    #iterative_closest_point.StartByMatchingCentroidsOn()
+    iterative_closest_point.Update()
+
+    return iterative_closest_point
