@@ -1,22 +1,70 @@
+from csv import DictReader
+from enum import auto, Enum
+from os.path import isfile
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Tuple
 
-from numpy import multiply, ndarray, newaxis
+from numpy import multiply, ndarray, newaxis, sum as sum_
+from pyacvd import Clustering
+from pyvista import wrap
 from slic3r_display import Slic3rBoxRepresentable, Slic3rPointRepresentable
 from vtk import (
+    vtkCurvatures,
+    vtkPoints,
     vtkIterativeClosestPointTransform,
     vtkPolyData,
+    vtkPolyDataNormals,
     vtkSTLReader,
     vtkSTLWriter,
     vtkTransform,
     vtkTransformPolyDataFilter,
 )
+from vtk.util.numpy_support import vtk_to_numpy
 
 def load_stl(filename: str) -> vtkPolyData:
     reader = vtkSTLReader()
     reader.SetFileName(filename)
     reader.Update()
     return reader.GetOutput()
+
+POINTS_HEADER = "x", "y", "z", "kind"
+
+class PointMode(Enum):
+    """
+    Mode of landmarks.
+    """
+    POI = 0
+    SCALE_HANDLE = auto()
+
+def load_points(
+    filename: Path, mode: PointMode, points: vtkPoints=None
+) -> List[Tuple[float, float, float]]:
+    """
+    Load points (Point of interest [POI], scale handle) from CSV files.
+    Returns 3D points as a list of 3-tuples.
+
+    Keyword arguments:
+    filename - file path to a CSV file, containing locations as generated
+               by fast_registration/marker.py.
+    mode - enum value describing the role of a location in loaded file.
+    points - [optional] vtkPoint object, where the points shall be appended to.
+    """
+    if not isfile(filename):
+        rows = []
+    else:
+        with open(filename, "r", encoding="utf-8") as csv_point_file:
+            csv = DictReader(csv_point_file, POINTS_HEADER)
+            rows = list(csv)
+    result = [
+        (float(row_dict["x"]), float(row_dict["y"]), float(row_dict["z"]),)
+        for row_dict in rows
+        if row_dict["kind"] == mode.name
+    ]
+    if not points is None:
+        for values in result:
+            points.InsertNextPoint(values)
+    return result
+
 
 def write(obj: Any, filename: Path) -> None:
     from .bounding_box import BoundingBox
