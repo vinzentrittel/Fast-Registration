@@ -1,25 +1,19 @@
 """
 This module provides an interface for a user to provide landmarks for a given STL geometry.
 """
-from csv import DictReader, DictWriter
-from enum import auto, Enum
-from os.path import isfile
-from pathlib import Path
-from pdb import set_trace as break_
+from csv import DictWriter
 from re import compile as Regex
 from typing import List, Tuple
 
+from PyQt5.QtGui import QDragEnterEvent, QDropEvent
 from PyQt5.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QMainWindow,
     QPushButton,
     QHBoxLayout,
     QVBoxLayout,
     QWidget,
 )
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent
-from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from vtk import (
     vtkActor,
     vtkCellArray,
@@ -28,19 +22,23 @@ from vtk import (
     vtkPoints,
     vtkPolyData,
     vtkPolyDataMapper,
+    vtkRenderWindowInteractor,
     vtkRenderer,
-    vtkIdList,
 )
+from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 from .util import load_points, load_stl, PointMode, POINTS_HEADER
 
 class MainWindow(QMainWindow):
-    # pylint: disable=attribute-defined-outside-init
-    def __init__(self):
+    """
+    GUI for marking landmarks on an STL mesh.
+    """
+    # pylint: disable=attribute-defined-outside-init,too-many-instance-attributes
+    def __init__(self) -> None:
         super().__init__()
 
-        self.setup_window()
-        self.setup_vertex_picking()
+        self._setup_window()
+        self._setup_vertex_picking()
         self.filename = ""
 
         # add elements for geometry display
@@ -54,6 +52,9 @@ class MainWindow(QMainWindow):
 
     @property
     def geometry(self) -> vtkPolyData:
+        """
+        Return currently loaded STL mesh as vtkPolyData.
+        """
         return self.geometry_mapper.GetInput()
 
     @geometry.setter
@@ -63,29 +64,51 @@ class MainWindow(QMainWindow):
         self.vtk_widget.GetRenderWindow().Render()
 
     @property
-    def points(self):
+    def points(self) -> None:
+        """
+        Return the landmarks of the currently loaded STL mesh as vtkPolyData.
+        The set of landmarks returned depends on the currently selected PointMode.
+        """
         return self._points[self.current_mode.value]
 
     @property
-    def point_mapper(self):
+    def point_mapper(self) -> None:
+        """
+        Return the data mapper currently connected to the landmarks of the currently
+        loaded STL mesh. The mapper returned depends on the currently selected PointMode.
+        """
         return self._point_mappers[self.current_mode.value]
 
     @property
     def current_mode(self) -> PointMode:
+        """
+        Return the mode currently active in the UI.
+        """
         return self._current_mode
 
     @current_mode.setter
     def current_mode(self, new_mode: PointMode) -> None:
+        """
+        Set new PointMode to 'new_mode'. The change results in a re-coloring of the previously
+        active point set and the point set active after the mode switch.
+        """
         self.point_actor.GetProperty().SetColor(0.5, 0.5, 0.5)
         self._current_mode = new_mode
         self.point_actor.GetProperty().SetColor(1.0, 0.0, 0.0)
 
     @property
     def point_actor(self) -> vtkActor:
+        """
+        Return the visual actor connected to to the landmarks of the currently loaded STL mesh.
+        The vtkActor returned depends on the currently selected PointMode.
+        """
         return self._point_actors[self.current_mode.value]
 
-    def setup_window(self) -> None:
-        self.setWindowTitle("VTK with PyQt: Mode Toggle Button")
+    def _setup_window(self) -> None:
+        """
+        Setup UI and connections for this program.
+        """
+        self.setWindowTitle("Landmark Marker")
         self.resize(800, 600)
         self.setAcceptDrops(True)
         self.left_button_pressed = False
@@ -103,7 +126,6 @@ class MainWindow(QMainWindow):
         self.poi_mode_button.setCheckable(True)
         self.poi_mode_button.setChecked(True)
         self.poi_mode_button.clicked.connect(lambda: self.toggle_mode(self.poi_mode_button))
-        #layout.addWidget(self.poi_mode_button)
         self.handle_mode_button = QPushButton("Scale Handle Mode")
         self.handle_mode_button.setCheckable(True)
         self.handle_mode_button.clicked.connect(lambda: self.toggle_mode(self.handle_mode_button))
@@ -113,12 +135,15 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_layout)
 
         self.renderer = vtkRenderer()
-        self.renderer.SetBackground(0.1, 0.2, 0.4)  # Background color
+        self.renderer.SetBackground(0.1, 0.2, 0.4)
         self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
 
-    def setup_vertex_picking(self):
+    def _setup_vertex_picking(self):
+        """
+        Initializing everything that has to do with adding new landmarks to an STL mesh.
+        """
         picker = vtkCellPicker()
-        interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
+        interactor: vtkRenderWindowInteractor = self.vtk_widget.GetRenderWindow().GetInteractor()
         interactor.SetInteractorStyle(vtkInteractorStyleTrackballCamera())
         interactor.SetPicker(picker)
         interactor.AddObserver("LeftButtonPressEvent", lambda _, event: self.on_click(
@@ -131,13 +156,13 @@ class MainWindow(QMainWindow):
         ))
         interactor.AddObserver(
             "EndInteractionEvent",
-            lambda obj, event: self.on_release(obj, event, picker),
+            lambda obj, _: self.on_release(obj, picker),
         )
 
         self._points = []
         self._point_mappers = []
         self._point_actors = []
-        for mode in PointMode:
+        for _ in PointMode:
             self._points.append(vtkPolyData())
             self._points[-1].SetVerts(vtkCellArray())
             self._points[-1].SetPoints(vtkPoints())
@@ -155,15 +180,29 @@ class MainWindow(QMainWindow):
         self.current_mode = PointMode.POI
         self.renderer.GetRenderWindow().Render()
 
-    def on_click(self, event, interactor):
+    def on_click(self, event: str, interactor: vtkRenderWindowInteractor) -> None:
+        """
+        Callback function to register left and right mouse button presses.
+
+        Keyword arguments:
+        event - name of the captured event.
+        interactor - interaction object, that captured this event.
+        """
         if "Left" in event:
             self.left_button_pressed = True
         elif "Right" in event:
             self.right_button_pressed = True
         self.mouse_position = interactor.GetEventPosition()
 
-    def on_release(self, obj, event, picker):
-        if self.geometry and self.mouse_position == obj.GetEventPosition():
+    def on_release(self, interactor: vtkRenderWindowInteractor, picker: vtkCellPicker) -> None:
+        """
+        Callback function to handle button clicks.
+
+        Keyword arguments:
+        interactor - interaction object, that captured the click.
+        picker - picker instance, to assign a click to an vtk object.
+        """
+        if self.geometry and self.mouse_position == interactor.GetEventPosition():
             picker.Pick(*self.mouse_position, 0, self.renderer)
 
             if self.left_button_pressed and picker.GetMapper() == self.geometry_mapper:
@@ -181,6 +220,13 @@ class MainWindow(QMainWindow):
         self.right_button_pressed = False
 
     def add_point(self, new_point: Tuple[float, float, float]) -> None:
+        """
+        Insert a new point to the current set of points. The expanded point set depends on the
+        currently selected PointMode. New points are stored immediately in a CSV file.
+
+        Keyword arguments:
+        new_point - 3D coordinates of a landmark point.
+        """
         new_point_id = self.points.GetPoints().InsertNextPoint(new_point)
         self.points.GetVerts().InsertNextCell(1)
         self.points.GetVerts().InsertCellPoint(new_point_id)
@@ -194,6 +240,15 @@ class MainWindow(QMainWindow):
         self.write()
 
     def remove_point(self, point_id: int) -> None:
+        """
+        Delete point with ID 'point_id' from the current set of points. The referenced point set
+        depends on the currently selected PointMode. The updated points are stored immediately in a
+        CSV file.
+
+        Keyword arguments:
+        point_id - ID of the point to be deleted as stored in the vtkPolyData currently selected.
+                   The ID must reference an existing point.
+        """
         self.set_points([
             self.points.GetPoint(id_)
             for id_ in range(self.points.GetNumberOfPoints())
@@ -201,15 +256,22 @@ class MainWindow(QMainWindow):
             ])
         self.write()
 
-    def set_points(self, points: List[Tuple[float, float, float]]) -> None:
-        new_points = vtkPoints()
-        new_verts = vtkCellArray()
-        for point in points:
-            point_id = new_points.InsertNextPoint(point)
-            new_verts.InsertNextCell(1)
-            new_verts.InsertCellPoint(point_id)
-        self.points.SetPoints(new_points)
-        self.points.SetVerts(new_verts)
+    def set_points(self, new_points: List[Tuple[float, float, float]]) -> None:
+        """
+        Assign a fresh list of 3D coordinates to the currently selected point set.
+        The currently active point set depends on the selected PointMode.
+
+        Keyword arguments:
+        new_points - list of 3-tuples filled with floating point numbers, representing 3D coordinates.
+        """
+        points = vtkPoints()
+        verts = vtkCellArray()
+        for point in new_points:
+            point_id = points.InsertNextPoint(point)
+            verts.InsertNextCell(1)
+            verts.InsertCellPoint(point_id)
+        self.points.SetPoints(points)
+        self.points.SetVerts(verts)
         self.points.GetPoints().Modified()
         self.points.GetVerts().Modified()
         self.points.Modified()
@@ -219,6 +281,13 @@ class MainWindow(QMainWindow):
         self.renderer.GetRenderWindow().Render()
 
     def write(self) -> None:
+        """
+        Write point sets for all PointModes in a CSV file.
+        The CSV file will have the same file name as the previously loaded STL mesh file, but
+        with a '.csv' extension as postfix.
+
+        'L1.stl' -> 'L1.stl.csv'
+        """
         previous_mode = self.current_mode
         with open(self.filename + ".csv", "w", encoding="utf-8") as point_file:
             csv = DictWriter(point_file, POINTS_HEADER)
@@ -231,6 +300,13 @@ class MainWindow(QMainWindow):
         self.current_mode = previous_mode
 
     def read(self) -> None:
+        """
+        Read all point sets for all PointModes from a CSV file.
+        The CSV file should have the same file name as the previously loaded STL mesh file, but
+        with a '.csv' extension as postfix.
+
+        'L1.stl' -> 'L1.stl.csv'
+        """
         previous_mode = self.current_mode
         for mode in PointMode:
             self.current_mode = mode
@@ -239,16 +315,36 @@ class MainWindow(QMainWindow):
         self.renderer.GetRenderWindow().Render()
 
     def append_points(self, new_points: List[Tuple[float, float, float]]) -> None:
+        """
+        Add a list of 3D coordinates to the currently selected point set.
+        The currently active point set depends on the selected PointMode.
+
+        Keyword arguments:
+        new_points - list of 3-tuples filled with floating point numbers, representing 3D coordinates.
+        """
         old_points = [self.points.GetPoint(id_) for id_ in range(self.points.GetNumberOfPoints())]
         self.set_points(old_points + new_points)
 
-    def dragEnterEvent(self, event: QDragEnterEvent):
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None: # pylint: disable=invalid-name
+        """
+        Just reject drag'n'drop actions, not involving files.
+
+        Keyword arguments:
+        event - object containing more information about the event instantiation.
+        """
         if event.mimeData().hasUrls():
             event.accept()
         else:
             event.ignore()
 
-    def dropEvent(self, event: QDropEvent):
+    def dropEvent(self, event: QDropEvent): # pylint: disable=invalid-name
+        """
+        Load mesh from file or points from .mrk.json file. If you are importing from json, make sure the
+        file conforms to the structure in place in 3D slices Markup point fiducial export files.
+
+        Keyword arguments:
+        event - object containing more information about the event instantiation.
+        """
         if event.mimeData().hasUrls():
             filename, *_ = event.mimeData().urls()
             filename = filename.path()
@@ -258,7 +354,7 @@ class MainWindow(QMainWindow):
                 self.read()
                 event.accept()
             elif filename.endswith(".mrk.json"):
-                regex = Regex("""\"position\":\s*\[([^,]+),\s*([^,]+),\s*([^,]+)],""")
+                regex = Regex(r"""\"position\":\s*\[([^,]+),\s*([^,]+),\s*([^,]+)],""")
                 with open(filename, "r", encoding="utf-8") as markups_file:
                     json = "".join(markups_file.readlines())
                 positions = [(float(x), float(y), float(z),) for x, y, z in regex.findall(json)]
@@ -269,8 +365,13 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
 
-    def toggle_mode(self, caller):
-        # Toggle between the two modes
+    def toggle_mode(self, caller: QPushButton):
+        """
+        Switch between the PointModes on a button click.
+
+        Keyword argument:
+        caller - the Qt button, that invoked this callback.
+        """
         if (
             caller is self.poi_mode_button and self.poi_mode_button.isChecked()
         ) or (
