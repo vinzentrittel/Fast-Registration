@@ -10,8 +10,9 @@ from pyvista import wrap
 from slic3r_display import Slic3rBoxRepresentable, Slic3rPointRepresentable
 from vtk import (
     vtkCurvatures,
-    vtkPoints,
+    vtkDataArray,
     vtkIterativeClosestPointTransform,
+    vtkPoints,
     vtkPolyData,
     vtkPolyDataNormals,
     vtkSTLReader,
@@ -27,7 +28,7 @@ def load_stl(filename: str) -> vtkPolyData:
     reader.Update()
     return reader.GetOutput()
 
-POINTS_HEADER = "x", "y", "z", "kind"
+POINTS_HEADER = "x", "y", "z", "nx", "ny", "nz", "kind"
 
 class PointMode(Enum):
     """
@@ -37,10 +38,10 @@ class PointMode(Enum):
     SCALE_HANDLE = auto()
 
 def load_points(
-    filename: Path, mode: PointMode, points: vtkPoints=None
+    filename: Path, mode: PointMode, points: vtkPoints=None, normals: vtkDataArray=None
 ) -> List[Tuple[float, float, float]]:
     """
-    Load points (Point of interest [POI], scale handle) from CSV files.
+    Load points (Point of interest [POI], scale handle) and there respective normals from CSV files.
     Returns 3D points as a list of 3-tuples.
 
     Keyword arguments:
@@ -48,21 +49,28 @@ def load_points(
                by fast_registration/marker.py.
     mode - enum value describing the role of a location in loaded file.
     points - [optional] vtkPoint object, where the points shall be appended to.
+    normals - [optional] vtkDataArray object, where the normals shall be appended to.
     """
+    if (points is None or normals is None) and points != normals:
+        raise ValueError("Provide vtkPoints and vtkDataArray to write to parameter objects")
     if not isfile(filename):
         rows = []
     else:
         with open(filename, "r", encoding="utf-8") as csv_point_file:
-            csv = DictReader(csv_point_file, POINTS_HEADER)
+            csv = DictReader(csv_point_file)
             rows = list(csv)
     result = [
-        (float(row_dict["x"]), float(row_dict["y"]), float(row_dict["z"]),)
+        (
+            (float(row_dict["x"]), float(row_dict["y"]), float(row_dict["z"]),),
+            (float(row_dict["nx"]), float(row_dict["ny"]), float(row_dict["nz"]),),
+        )
         for row_dict in rows
         if row_dict["kind"] == mode.name
     ]
     if not points is None:
-        for values in result:
-            points.InsertNextPoint(values)
+        for point, normal in result:
+            points.InsertNextPoint(point)
+            normals.InsertNextTuple(normal)
     return result
 
 

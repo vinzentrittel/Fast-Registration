@@ -5,8 +5,8 @@ from csv import DictWriter
 from re import compile as Regex
 from typing import List, Tuple
 
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent
-from PyQt5.QtWidgets import (
+from PyQt5.QtGui import QDragEnterEvent, QDropEvent # pylint: disable=no-name-in-module
+from PyQt5.QtWidgets import ( # pylint: disable=no-name-in-module
     QApplication,
     QMainWindow,
     QPushButton,
@@ -14,14 +14,17 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from vtk import (
+from vtk import ( # pylint: disable=no-name-in-module
     vtkActor,
     vtkCellArray,
     vtkCellPicker,
+    vtkDataArray,
+    vtkFloatArray,
     vtkInteractorStyleTrackballCamera,
     vtkPoints,
     vtkPolyData,
     vtkPolyDataMapper,
+    vtkPolyDataNormals,
     vtkRenderWindowInteractor,
     vtkRenderer,
 )
@@ -59,7 +62,16 @@ class MainWindow(QMainWindow):
 
     @geometry.setter
     def geometry(self, new_geometry: vtkPolyData) -> None:
+        """
+        Updates the STL mesh displayed to a new one.
+        """
         self.geometry_mapper.SetInputData(new_geometry)
+        normals = vtkPolyDataNormals()
+        normals.ComputePointNormalsOn()
+        normals.SplittingOff()
+        normals.SetInputData(new_geometry)
+        normals.Update()
+        new_geometry.GetPointData().SetNormals(normals.GetOutput().GetPointData().GetNormals())
         self.renderer.ResetCamera()
         self.vtk_widget.GetRenderWindow().Render()
 
@@ -78,6 +90,14 @@ class MainWindow(QMainWindow):
         loaded STL mesh. The mapper returned depends on the currently selected PointMode.
         """
         return self._point_mappers[self.current_mode.value]
+
+    @property
+    def normals(self) -> vtkDataArray:
+        """
+        Return the normals to the landmakrs of the currently loaded STL mesh as vtkDataArray.
+        The set of normals returned depends on the currently selected PointMode.
+        """
+        return self.points.GetPointData().GetNormals()
 
     @property
     def current_mode(self) -> PointMode:
@@ -168,6 +188,10 @@ class MainWindow(QMainWindow):
             self._points.append(vtkPolyData())
             self._points[-1].SetVerts(vtkCellArray())
             self._points[-1].SetPoints(vtkPoints())
+            normals = vtkFloatArray()
+            normals.SetName("Normals")
+            normals.SetNumberOfComponents(3)
+            self._points[-1].GetPointData().SetNormals(normals)
 
             self._point_mappers.append(vtkPolyDataMapper())
             self._point_mappers[-1].SetInputData(self._points[-1])
@@ -209,7 +233,10 @@ class MainWindow(QMainWindow):
 
             if self.left_button_pressed and picker.GetMapper() == self.geometry_mapper:
                 point_id = picker.GetPointId()
-                self.add_point(self.geometry.GetPoint(point_id))
+                self.add_point(
+                    new_point=self.geometry.GetPoint(point_id),
+                    new_normal=self.geometry.GetPointData().GetNormals().GetTuple(point_id),
+                )
             elif self.right_button_pressed                  \
                 and self.points.GetNumberOfPoints() > 0     \
             :
@@ -221,15 +248,19 @@ class MainWindow(QMainWindow):
         self.left_button_pressed = False
         self.right_button_pressed = False
 
-    def add_point(self, new_point: Tuple[float, float, float]) -> None:
+    def add_point(
+        self, new_point: Tuple[float, float, float], new_normal: Tuple[float, float, float]
+    ) -> None:
         """
         Insert a new point to the current set of points. The expanded point set depends on the
         currently selected PointMode. New points are stored immediately in a CSV file.
 
         Keyword arguments:
         new_point - 3D coordinates of a landmark point.
+        new_normal - 3D normal vector associated with new landmark point.
         """
         new_point_id = self.points.GetPoints().InsertNextPoint(new_point)
+        self.points.GetPointData().GetNormals().InsertTuple3(new_point_id, *new_normal)
         self.points.GetVerts().InsertNextCell(1)
         self.points.GetVerts().InsertCellPoint(new_point_id)
         self.points.GetVerts().Modified()
@@ -251,31 +282,50 @@ class MainWindow(QMainWindow):
         point_id - ID of the point to be deleted as stored in the vtkPolyData currently selected.
                    The ID must reference an existing point.
         """
-        self.set_points([
-            self.points.GetPoint(id_)
-            for id_ in range(self.points.GetNumberOfPoints())
-            if id_ != point_id
-            ])
+        self.set_points(
+            new_points=[
+                self.points.GetPoint(id_)
+                for id_ in range(self.points.GetNumberOfPoints())
+                if id_ != point_id
+            ],
+            new_normals=[
+                self.normals.GetTuple(id_)
+                for id_ in range(self.normals.GetNumberOfTuples())
+            ],
+        )
         self.write()
 
-    def set_points(self, new_points: List[Tuple[float, float, float]]) -> None:
+    def set_points(
+        self,
+        new_points: List[Tuple[float, float, float]],
+        new_normals: List[Tuple[float, float, float]],
+    ) -> None:
         """
         Assign a fresh list of 3D coordinates to the currently selected point set.
         The currently active point set depends on the selected PointMode.
 
         Keyword arguments:
-        new_points - list of 3-tuples filled with floating point numbers, representing 3D coordinates.
+        new_points - list of 3-tuples filled with floating point numbers, representing 3D
+                     coordinates.
+        new_normals - list of 3-tuples filled with floating point numbers, representing 3D
+                      normal vectors for 'new_points' in order.
         """
         points = vtkPoints()
         verts = vtkCellArray()
-        for point in new_points:
+        normals = vtkFloatArray()
+        normals.SetName("Normals")
+        normals.SetNumberOfComponents(3)
+        for point, normal in zip(new_points, new_normals):
             point_id = points.InsertNextPoint(point)
+            normals.InsertTuple(point_id, normal)
             verts.InsertNextCell(1)
             verts.InsertCellPoint(point_id)
         self.points.SetPoints(points)
         self.points.SetVerts(verts)
         self.points.GetPoints().Modified()
         self.points.GetVerts().Modified()
+        self.points.Modified()
+        self.points.GetPointData().SetNormals(normals)
         self.points.Modified()
         self.points.BuildCells()
         self.points.BuildLinks()
@@ -297,7 +347,10 @@ class MainWindow(QMainWindow):
             for mode in PointMode:
                 self.current_mode = mode
                 for id_ in range(self.points.GetNumberOfPoints()):
-                    row = dict(zip(POINTS_HEADER, self.points.GetPoint(id_) + (mode.name,)))
+                    row = dict(zip(
+                        POINTS_HEADER,
+                        self.points.GetPoint(id_) + self.normals.GetTuple(id_) + (mode.name,),
+                    ))
                     csv.writerow(row)
         self.current_mode = previous_mode
 
@@ -312,20 +365,30 @@ class MainWindow(QMainWindow):
         previous_mode = self.current_mode
         for mode in PointMode:
             self.current_mode = mode
-            self.set_points(load_points(self.filename + ".csv", mode))
+            point_data: List[Tuple[float, float, float]] = load_points(self.filename + ".csv", mode)
+            points, normals = zip(*point_data) if point_data else ([], [],)
+            self.set_points(points, normals)
         self.current_mode = previous_mode
         self.renderer.GetRenderWindow().Render()
 
-    def append_points(self, new_points: List[Tuple[float, float, float]]) -> None:
+    def append_points(
+        self,
+        new_points: List[Tuple[float, float, float]],
+        new_normals: List[Tuple[float, float, float]],
+    ) -> None:
         """
         Add a list of 3D coordinates to the currently selected point set.
         The currently active point set depends on the selected PointMode.
 
         Keyword arguments:
-        new_points - list of 3-tuples filled with floating point numbers, representing 3D coordinates.
+        new_points - list of 3-tuples filled with floating point numbers, representing 3D
+        coordinates.
+        new_normals - list of 3-tuples filled with floating point numbers, representing 3D
+                      normal vectors for 'new_points' in order.
         """
         old_points = [self.points.GetPoint(id_) for id_ in range(self.points.GetNumberOfPoints())]
-        self.set_points(old_points + new_points)
+        old_normals = [self.normals.GetTuple(id_) for id_ in range(self.points.GetNumberOfPoints())]
+        self.set_points(old_points + new_points, old_normals + new_normals)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None: # pylint: disable=invalid-name
         """
@@ -341,8 +404,8 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event: QDropEvent): # pylint: disable=invalid-name
         """
-        Load mesh from file or points from .mrk.json file. If you are importing from json, make sure the
-        file conforms to the structure in place in 3D slices Markup point fiducial export files.
+        Load mesh from file or points from .mrk.json file. If you are importing from json, make sure
+        the file conforms to the structure in place in 3D slices Markup point fiducial export files.
 
         Keyword arguments:
         event - object containing more information about the event instantiation.
@@ -360,7 +423,13 @@ class MainWindow(QMainWindow):
                 with open(filename, "r", encoding="utf-8") as markups_file:
                     json = "".join(markups_file.readlines())
                 positions = [(float(x), float(y), float(z),) for x, y, z in regex.findall(json)]
-                self.append_points(positions)
+                normals = [
+                    self.geometry.GetPointData().GetNormals().GetTuple(
+                        self.geometry.GetPointLocator().FindClosestPoint(position)
+                    )
+                    for position in positions
+                ]
+                self.append_points(new_points=positions, new_normals=normals)
                 event.accept()
             else:
                 event.ignore()
