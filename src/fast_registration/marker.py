@@ -93,8 +93,10 @@ class MainWindow(QMainWindow):
         active point set and the point set active after the mode switch.
         """
         self.point_actor.GetProperty().SetColor(0.5, 0.5, 0.5)
+        self.point_actor.GetProperty().SetPointSize(9.9)
         self._current_mode = new_mode
         self.point_actor.GetProperty().SetColor(1.0, 0.0, 0.0)
+        self.point_actor.GetProperty().SetPointSize(10)
 
     @property
     def point_actor(self) -> vtkActor:
