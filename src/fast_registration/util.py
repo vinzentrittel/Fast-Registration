@@ -111,28 +111,50 @@ def transform(geometry: vtkPolyData, matrix: ndarray) -> vtkPolyData:
 
     return transform_filter.GetOutput()
 
-def calculate_icp_transformation(
-    source_geometry: vtkPolyData, target_geometry: vtkPolyData
-) -> vtkIterativeClosestPointTransform:
+def point_correspondences(
+    source: vtkPolyData, target_points: ndarray, target_normals: ndarray, cluster_count: int=2000
+) -> ndarray:
     """
-    Calculate a transformation matrix, to rigidly register a 'source_geometry'
-    onto the position of 'target_geometry'. Transformation algorithm is the
-    iterative closest point search.
+    Return points on the source mesh, that have a similar location and orientation
+    as sparse target_points and target_normals.
+
+    Beware! Only points on "sharp" or "pointy" locations are considered.
 
     Keyword arguments:
-    source_geometry - a vtkPolyData mesh, that should be moved to align with
-                      'target_geometry'.
-    target_geometry - the destination of a 'source_geometry'
+    source - geometry that should be inspected for correspondences.
+    target_points - 3D landmarks to identify on the source
+    target_normals - orientation normal to be expected of a POI on the source mesh.
+    cluster_count - number of clusters for remeshing
     """
-    iterative_closest_point = vtkIterativeClosestPointTransform()
-    iterative_closest_point.SetSource(source_geometry)
-    iterative_closest_point.SetTarget(target_geometry)
-    iterative_closest_point.GetLandmarkTransform().SetModeToRigidBody()
-    iterative_closest_point.SetMaximumNumberOfLandmarks(200)
-    iterative_closest_point.SetMaximumMeanDistance(0.00001)
-    iterative_closest_point.SetMaximumNumberOfIterations(25)
-    #iterative_closest_point.CheckMeanDistanceOn()
-    #iterative_closest_point.StartByMatchingCentroidsOn()
-    iterative_closest_point.Update()
+    clustering = Clustering(wrap(source))
+    clustering.cluster(cluster_count)
+    source = clustering.create_mesh()
 
-    return iterative_closest_point
+    curvature_type = 'Gauss_Curvature'
+    curvatures = vtkCurvatures()
+    curvatures.SetCurvatureTypeToGaussian()
+    curvatures.SetInputData(source)
+    curvatures.Update()
+    curvatures = vtk_to_numpy(
+        curvatures.GetOutput().GetPointData().GetAbstractArray(curvature_type)
+    )
+    sharp_point_indices = (curvatures > 0.05).nonzero()
+
+    normals = vtkPolyDataNormals()
+    normals.ComputeCellNormalsOff()
+    normals.ComputePointNormalsOn()
+    normals.SplittingOff()
+    normals.SetInputData(source)
+    normals.Update()
+    normals = vtk_to_numpy(normals.GetOutput().GetPointData().GetNormals())
+    normals = normals[sharp_point_indices]
+    normal_weights = target_normals.dot(normals.T)
+
+    points = vtk_to_numpy(source.GetPoints().GetData())
+    sharp_points = points[sharp_point_indices]
+    squared_distances_to_target = sum_(
+        (target_points[None, :, :] - sharp_points[:, None, :])**2, axis=2
+    ).T
+    weights = normal_weights / squared_distances_to_target
+
+    return points[weights.argmax(axis=1)]

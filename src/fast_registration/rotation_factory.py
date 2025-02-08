@@ -1,10 +1,11 @@
 from scipy.spatial.transform import Rotation
-from numpy import apply_along_axis, arange, array, isclose, ndarray, newaxis, sort
+from numpy import apply_along_axis, arange, array, ndarray, newaxis
 
-from .axis import AxisValue, Converter as AxisConverter
+from .axis import Converter as AxisConverter
 
 class RotationFactory:
     """
+    # TODO: this should not be a class
     Utility class to match corresponding cube sections.
     For a given rotation matrix from RotationFactory.Rotations
     find the current subcube location axes.
@@ -47,7 +48,7 @@ class RotationFactory:
         for n in (0, 90, 180, 270,)
     ))
     
-    _CorrespondenceOrder: ndarray
+    RotationIndexCorrespondences: ndarray
     _RotatedLocations: ndarray
 
     @classmethod
@@ -58,14 +59,14 @@ class RotationFactory:
         lays in the correct subcube. Note: this will only work, if the
         original values were also in the correct subcube.
 
-        For the order, visit: src/axis.py
+        For the order, visit: src/fast_registration/axis.py
 
         Arguments:
         points - numpy.ndarray of shape = (27, 3,), representing
                  a 3d point cloud.
         """
         points = cls._rotate(points)
-        return points[cls._RotationOrder, cls._CorrespondenceOrder]
+        return points[cls._RotationOrder, cls.RotationIndexCorrespondences]
 
     @classmethod
     def _rotate(cls, points: ndarray) -> ndarray:
@@ -116,6 +117,13 @@ class RotationFactory:
 
         return array(tuple(map(calc_section_1d, point)))
 
+# pylint: disable=protected-access
 RotationFactory.Rotations = RotationFactory._make_rotations()
 RotationFactory._RotatedLocations = RotationFactory._make_location_correspondences()
-RotationFactory._CorrespondenceOrder = RotationFactory._make_correspondence_order(RotationFactory._RotatedLocations)
+# TODO: holy mother of hacks... this is what I needed and I already implemented it :)
+RotationFactory.RotationIndexCorrespondences = RotationFactory._make_correspondence_order(
+    RotationFactory._RotatedLocations
+)
+
+if __name__ == "__main__":
+    print(RotationFactory.RotationIndexCorrespondences)

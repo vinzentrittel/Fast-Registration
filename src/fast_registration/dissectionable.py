@@ -28,19 +28,28 @@ class Dissectionable:
         )
         self.clipper = IdentityClipper()
         self.clipper.input_data = normalized_geometry
-        self.sections = DefaultPoints.copy()
 
     @property
     def normalized_geometry(self) -> vtkPolyData:
         return self.clipper.input_data
 
-    def min_err_rotation(self, other: Dissectionable) -> ndarray:
+    def min_err_rotation(self, other: Dissectionable) -> int:
         """
-        Return that rotation transformation, that yields the smallest absolute euklidean
+        Return that rotation transformation index, that yields the smallest absolute euklidean
         distance between this object and the 'other' object.
+
+        To resolve the index, use members of rotation_factory.py
 
         Keyword arguments:
         other - an object to compare this instace of Dissectionable against.
+
+        Usage:
+
+        source = Dissectionable(load_stl("source.stl"))
+        target = Dissectionable(load_stl("target.stl"))
+        rotation_index = source.min_err_rotation(target)
+        transformation_matrix = RotationFactory.Rotations[rotation_index]
+        index_correspondeces = RotationFactory.RotationIndexCorrespondences[rotation_index]
         """
         self_projection = self.calc_section_projections()
         other_projection = other.calc_section_projections()
@@ -51,7 +60,7 @@ class Dissectionable:
             norm(absolute(self_permutations - other_permutations), axis=2),
             axis=1,
         )
-        return RotationFactory.Rotations[absolute_errors.argmin()]
+        return absolute_errors.argmin()
 
     def calc_section_projections(self) -> ndarray:
         """
@@ -63,8 +72,7 @@ class Dissectionable:
         """
         projections = []
         for projection, direction, clip in zip(
-            # TODO: need generator for IdentityClipper
-            self.sections, DefaultRays, self.clipper
+            DefaultPoints, DefaultRays, self.clipper
         ):
             vertices = clip.GetPoints()
             if vertices is not None and vertices.GetNumberOfPoints() > 0:
@@ -78,61 +86,8 @@ class Dissectionable:
         back_projections[:, :3] = array(projections)
         return array(projections)
 
-    @staticmethod
-    def make_sections() -> List[List[List[Section]]]:
-        """
-        Returns 27 sections of this instance. Sections are created by slicing this
-        instance's geometry two times in the three body planes.
-        """
-        sections = [[3 * [None] for _ in range(3)] for _ in range(3)]
-        for frontal in (AxisValue.Left, AxisValue.Center, AxisValue.Right,):
-            for sagittal in (AxisValue.Posterior, AxisValue.Center, AxisValue.Anterior,):
-                for longitudinal in (AxisValue.Inferior, AxisValue.Center, AxisValue.Superior,):
-                    sections[frontal][sagittal][longitudinal] = Section(
-                        frontal, sagittal, longitudinal
-                    )
-        return sections
-
-@dataclass
-class Section:
-    """
-    Data container for attributes of each sub-cube for an Dissectionable object.
-    """
-    default_point: ndarray
-    direction: ndarray
-    point: ndarray
-
-    @staticmethod
-    def make_section(
-        frontal: AxisValue, sagittal: AxisValue, longitudinal: AxisValue
-    ) -> Section:
-        """
-        Create a dummy section, where the projection point is set to a
-        sensible default value and the normal (direction)
-        points in a sensible direction for that section.
-        
-        What is sensible is determined by 'frontal', 'sagittal' and
-        'longitudinal' parameters.
-
-        Keyword arguments:
-        frontal - enum value to indicate placement in the frontal plane.
-        sagittal - enum value to indicate placement in the sagittal plane.
-        longitudinal - enum value to indicate placement in the longitudinal plane.
-        """
-        default_point = DefaultPoints[
-            AxisConverter.to_index((frontal, sagittal, longitudinal,))
-        ].copy()
-        direction=DefaultRays[
-            AxisConverter.to_index((frontal, sagittal, longitudinal,))
-        ].copy()
-        return Section(
-            default_point=default_point,
-            direction=direction,
-            point=default_point.copy(),
-        )
-
 if __name__ == '__main__':
-    from util import load_stl
+    from .util import load_stl
     vertebra = load_stl("data/L5.stl")
 
     from timeit import default_timer
