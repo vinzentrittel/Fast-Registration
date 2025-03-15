@@ -2,10 +2,14 @@
 This module provides an interface for a user to provide landmarks for a given STL geometry.
 """
 from csv import DictWriter
+from os.path import basename
 from re import compile as Regex
+from time import sleep
+from threading import Timer
 from typing import List, Tuple
 
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent # pylint: disable=no-name-in-module
+from PyQt5.QtCore import Qt # pylint: disable=no-name-in-module
+from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent # pylint: disable=no-name-in-module
 from PyQt5.QtWidgets import ( # pylint: disable=no-name-in-module
     QApplication,
     QMainWindow,
@@ -21,16 +25,29 @@ from vtk import ( # pylint: disable=no-name-in-module
     vtkDataArray,
     vtkFloatArray,
     vtkInteractorStyleTrackballCamera,
+    vtkLookupTable,
     vtkPoints,
     vtkPolyData,
     vtkPolyDataMapper,
     vtkPolyDataNormals,
     vtkRenderWindowInteractor,
     vtkRenderer,
+    vtkTextActor,
+    vtkTextRepresentation,
+    vtkTextWidget,
 )
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
-from .util import load_points, load_stl, PointMode, POINTS_HEADER
+from .util import (
+    calculate_curvature,
+    load_points,
+    load_stl,
+    n_greatest_values,
+    PointMode,
+    POINTS_HEADER,
+    smooth_normals,
+    remesh,
+)
 
 class MainWindow(QMainWindow):
     """
@@ -65,13 +82,16 @@ class MainWindow(QMainWindow):
         """
         Updates the STL mesh displayed to a new one.
         """
-        self.geometry_mapper.SetInputData(new_geometry)
         normals = vtkPolyDataNormals()
         normals.ComputePointNormalsOn()
         normals.SplittingOff()
         normals.SetInputData(new_geometry)
-        normals.Update()
-        new_geometry.GetPointData().SetNormals(normals.GetOutput().GetPointData().GetNormals())
+        new_geometry = smooth_normals(normals.GetOutputPort())
+
+        self.geometry_mapper.SetInputData(new_geometry)
+        self.geometry_mapper.SetScalarVisibility(False)
+
+        self.text = f"Loaded {new_geometry.GetNumberOfPoints()} vertices."
         self.renderer.ResetCamera()
         self.vtk_widget.GetRenderWindow().Render()
 
@@ -126,6 +146,26 @@ class MainWindow(QMainWindow):
         """
         return self._point_actors[self.current_mode.value]
 
+    @property
+    def text(self) -> str:
+        """
+        Return the text displayed in the upper left corner.
+        """
+        return self.text_widget.GetTextActor().GetInput()
+
+    @text.setter
+    def text(self, new_text: str) -> None:
+        def animate(that_text):
+            head = ""
+            pause = 0.001 / len(new_text)
+            for l in that_text:
+                head = head + l
+                self.text_widget.GetTextActor().SetInput(head)
+                sleep(pause)
+                self.vtk_widget.Render()
+
+        Timer(0.0, lambda: animate(new_text)).start()
+
     def _setup_window(self) -> None:
         """
         Setup UI and connections for this program.
@@ -141,6 +181,7 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         self.vtk_widget = QVTKRenderWindowInteractor(self)
+        self.vtk_widget.keyReleaseEvent = self.keyReleaseEvent
         layout = QVBoxLayout(central_widget)
         layout.addWidget(self.vtk_widget)
 
@@ -159,6 +200,21 @@ class MainWindow(QMainWindow):
         self.renderer = vtkRenderer()
         self.renderer.SetBackground(0.1, 0.2, 0.4)
         self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
+
+        self.text_widget = vtkTextWidget()
+        self.text_widget.SetRepresentation(vtkTextRepresentation())
+        self.text_widget.GetRepresentation().GetPositionCoordinate().SetValue(0.01, 0.955)
+        self.text_widget.GetRepresentation().GetPosition2Coordinate().SetValue(0.99, 0.025)
+        self.text_widget.SetInteractor(self.vtk_widget.GetRenderWindow().GetInteractor())
+        self.text_widget.SetTextActor(vtkTextActor())
+        self.text_widget.GetTextActor().GetTextProperty().SetColor(0.9, 0.9, 0.9)
+        self.text_widget.GetTextActor().GetTextProperty().SetJustificationToLeft()
+        self.text_widget.ResizableOff()
+        self.text_widget.SelectableOff()
+        self.text_widget.ProcessEventsOff()
+        self.text_widget.GetBorderRepresentation().SetShowBorderToOff()
+        self.text_widget.GetTextActor().SetInput("Drop STL file")
+        self.text_widget.On()
 
     def _setup_vertex_picking(self):
         """
@@ -291,6 +347,7 @@ class MainWindow(QMainWindow):
             new_normals=[
                 self.normals.GetTuple(id_)
                 for id_ in range(self.normals.GetNumberOfTuples())
+                if id_ != point_id
             ],
         )
         self.write()
@@ -352,6 +409,7 @@ class MainWindow(QMainWindow):
                         self.points.GetPoint(id_) + self.normals.GetTuple(id_) + (mode.name,),
                     ))
                     csv.writerow(row)
+        self.text = f"Written to '{basename(self.filename) + '.csv'}'"
         self.current_mode = previous_mode
 
     def read(self) -> None:
@@ -436,6 +494,38 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
 
+    def keyReleaseEvent(self, event: QKeyEvent): # pylint: disable=invalid-name
+        """
+        Hard coded keybindings and there actions.
+        """
+        if event.key() == Qt.Key_S and not self.geometry is None:
+            if self.geometry_mapper.GetScalarVisibility():
+                self.geometry_mapper.SetScalarVisibility(False)
+                self.renderer.GetRenderWindow().Render()
+                return
+
+            curvatures = calculate_curvature(self.geometry)
+            scalars = n_greatest_values(curvatures, n=int(self.geometry.GetNumberOfPoints() / 2))
+            scalars.SetName("ColorGroups")
+            self.geometry.GetPointData().SetScalars(scalars)
+
+            lookup_table = vtkLookupTable()
+            lookup_table.SetNumberOfTableValues(2)
+            lookup_table.Build()
+            lookup_table.SetTableValue(0,  0.9, 0.9, 0.9)
+            lookup_table.SetTableValue(1,  1.0, 0.0, 0.0)
+
+            self.geometry_mapper.SetScalarRange(0, 1)
+            self.geometry_mapper.SetLookupTable(lookup_table)
+            self.geometry_mapper.SetScalarVisibility(True)
+            self.renderer.GetRenderWindow().Render()
+        elif event.key() == Qt.Key_D and not self.geometry is None:
+            # Here is just some random stuff for debugging and displaying
+            # WIP data.
+            self.geometry = remesh(self.geometry, cluster_count=2000)
+        elif event.key() == Qt.Key_Q:
+            self.close()
+
     def toggle_mode(self, caller: QPushButton):
         """
         Switch between the PointModes on a button click.
@@ -452,10 +542,12 @@ class MainWindow(QMainWindow):
             self.handle_mode_button.setChecked(False)
             self.poi_mode_button.setChecked(True)
             self.current_mode = PointMode.POI
+            self.text = "POI Mode"
         else:
             self.handle_mode_button.setChecked(True)
             self.poi_mode_button.setChecked(False)
             self.current_mode = PointMode.SCALE_HANDLE
+            self.text = "Scale Handle Mode"
         self.renderer.GetRenderWindow().Render()
 
 if __name__ == "__main__":

@@ -1,17 +1,59 @@
+"""
+Collection of useful functions for this project.
+
+load_stl(filename: str) - load geometry from drive.
+
+load_points(
+    filename: Path, mode: PointMode, points: vtkPoints=None, normals: vtkDataArray=None
+) - load landmark points from csv file.
+
+write(obj: Any, filename: Path) - write various objects to drive.
+
+transform(geometry: vtkPolyData, matrix: ndarray) - rigidly modify a VTK geometry by a 4x4 matrix.
+
+calculate_curvature(source: vtkPolyData)
+    - calculate degree of curvature for all vertices of a VTK geometry.
+
+n_greatest_values(array: vtkDoubleArray, n: int) - mark all n greatest values of a VTK array.
+
+remesh(geometry: vtkPolyData, cluster_count: int)
+    - remesh a VTK geometry to a pre-stated number of vertices.
+
+point_correspondences(
+    source: vtkPolyData, target_points: ndarray, target_normals: ndarray, cluster_count: int=2000
+)
+    - find points of source geometry, that share most similar properties with points of target
+      geometry.
+"""
 from csv import DictReader
 from enum import auto, Enum
 from os.path import isfile
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Union
 
-from numpy import multiply, ndarray, newaxis, sum as sum_
+from numpy import (
+    arange,
+    argmax,
+    argpartition,
+    argsort,
+    array,
+    multiply,
+    ndarray,
+    newaxis,
+    zeros,
+)
+from numpy.linalg import norm
 from pyacvd import Clustering
 from pyvista import wrap
 from slic3r_display import Slic3rBoxRepresentable, Slic3rPointRepresentable
-from vtk import (
+from vtk import ( # pylint: disable=no-name-in-module
+    vtkAlgorithmOutput,
+    vtkCellDataToPointData,
     vtkCurvatures,
     vtkDataArray,
-    vtkIterativeClosestPointTransform,
+    vtkDecimatePro,
+    vtkDoubleArray,
+    vtkPointDataToCellData,
     vtkPoints,
     vtkPolyData,
     vtkPolyDataNormals,
@@ -20,15 +62,22 @@ from vtk import (
     vtkTransform,
     vtkTransformPolyDataFilter,
 )
-from vtk.util.numpy_support import vtk_to_numpy
+from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy # pylint: disable=import-error,no-name-in-module
 
 def load_stl(filename: str) -> vtkPolyData:
+    """
+    Load a VTK surface geometry from an STL file.
+
+    Keyword arguments:
+    filename - path to where the STL file is stored at.
+    """
     reader = vtkSTLReader()
     reader.SetFileName(filename)
     reader.Update()
     return reader.GetOutput()
 
 POINTS_HEADER = "x", "y", "z", "nx", "ny", "nz", "kind"
+CURVATURE_TYPE =  "Mean_Curvature" # or "Gauss_Curvature"
 
 class PointMode(Enum):
     """
@@ -75,7 +124,18 @@ def load_points(
 
 
 def write(obj: Any, filename: Path) -> None:
-    from .bounding_box import BoundingBox
+    """
+    Utility to save various objects to disc.
+
+    Keyword arguments:
+    obj - instance to save (can be
+              bounding_box.BoundingBox,
+              vtkPolyData,
+              numpy.ndarray with shape==(n, 3,),
+          )
+    filename - path to store the file.
+    """
+    from .bounding_box import BoundingBox # pylint: disable=import-outside-toplevel
 
     if isinstance(obj, BoundingBox):
         Slic3rBoxRepresentable.write_from(
@@ -111,50 +171,101 @@ def transform(geometry: vtkPolyData, matrix: ndarray) -> vtkPolyData:
 
     return transform_filter.GetOutput()
 
-def point_correspondences(
-    source: vtkPolyData, target_points: ndarray, target_normals: ndarray, cluster_count: int=2000
-) -> ndarray:
+def calculate_curvature(source: vtkPolyData) -> vtkDoubleArray:
     """
-    Return points on the source mesh, that have a similar location and orientation
-    as sparse target_points and target_normals.
-
-    Beware! Only points on "sharp" or "pointy" locations are considered.
+    Return VTK array containing the degree of curvature for each source's vertex in order.
 
     Keyword arguments:
-    source - geometry that should be inspected for correspondences.
-    target_points - 3D landmarks to identify on the source
-    target_normals - orientation normal to be expected of a POI on the source mesh.
-    cluster_count - number of clusters for remeshing
+    source - VTK surface geometry.
     """
-    clustering = Clustering(wrap(source))
-    clustering.cluster(cluster_count)
-    source = clustering.create_mesh()
-
-    curvature_type = 'Gauss_Curvature'
     curvatures = vtkCurvatures()
-    curvatures.SetCurvatureTypeToGaussian()
+    if "Gauss" in CURVATURE_TYPE:
+        curvatures.SetCurvatureTypeToGaussian()
+    else:
+        curvatures.SetCurvatureTypeToMean()
     curvatures.SetInputData(source)
-    curvatures.Update()
-    curvatures = vtk_to_numpy(
-        curvatures.GetOutput().GetPointData().GetAbstractArray(curvature_type)
-    )
-    sharp_point_indices = (curvatures > 0.05).nonzero()
+    #curvatures.Update()
 
-    normals = vtkPolyDataNormals()
-    normals.ComputeCellNormalsOff()
-    normals.ComputePointNormalsOn()
-    normals.SplittingOff()
-    normals.SetInputData(source)
-    normals.Update()
-    normals = vtk_to_numpy(normals.GetOutput().GetPointData().GetNormals())
-    normals = normals[sharp_point_indices]
-    normal_weights = target_normals.dot(normals.T)
+    averager = vtkPointDataToCellData()
+    averager.SetInputConnection(curvatures.GetOutputPort())
+    back_averager = vtkCellDataToPointData()
+    back_averager.SetInputConnection(averager.GetOutputPort())
+    back_averager.Update()
+    #return curvatures.GetOutput().GetPointData().GetAbstractArray(CURVATURE_TYPE)
+    return back_averager.GetOutput().GetPointData().GetAbstractArray(CURVATURE_TYPE)
 
-    points = vtk_to_numpy(source.GetPoints().GetData())
-    sharp_points = points[sharp_point_indices]
-    squared_distances_to_target = sum_(
-        (target_points[None, :, :] - sharp_points[:, None, :])**2, axis=2
-    ).T
-    weights = normal_weights / squared_distances_to_target
+def n_greatest_values(array_: vtkDoubleArray, n: int) -> vtkDoubleArray:
+    """
+    For a given VTK array, marke each of the n greatest values with 1.0.
+    Else 0.0.
+    """
+    numpy_array = vtk_to_numpy(array_)
+    filter_mask = zeros(len(numpy_array))
+    filter_mask[argpartition(-numpy_array, n)[:n]] = 1.0
+    return numpy_to_vtk(filter_mask)
 
-    return points[weights.argmax(axis=1)]
+def remesh(geometry: vtkPolyData, cluster_count: int, decimate: bool=False) -> vtkPolyData:
+    """
+    Given an updated number of new vertices, this method returns mesh, so that is consists
+    of triangles only of roughly equal area.
+
+    Keyword arguments:
+    geometry - VTK surface geometry.
+    cluster_count - maximum number of vertices, the resulting geometry will have.
+    decimate - flag to trigger decimation to minimal geometry that preserves topology.
+    """
+    clustering = Clustering(wrap(geometry))
+    clustering.cluster(cluster_count)
+    if not decimate:
+        return clustering.create_mesh()
+
+    decimation = vtkDecimatePro()
+    decimation.SetInputData(clustering.create_mesh())
+    decimation.PreserveTopologyOn()
+    decimation.Update()
+    return decimation.GetOutput()
+
+def smooth_normals(input_: Union[vtkPolyData, vtkAlgorithmOutput]) -> vtkPolyData:
+    """
+    Interpolate the "Normals" VTK data array by their surrounding cells.
+    To work properly the normals must have previously been calculated and be available
+    for the "input_"'s PointData.GetNormals().
+
+    Return a whole new vtkPolyData object. The input is left untouched.
+
+    Keyword Arguments:
+    input_ - vtkPolyData object or an algorithms output (see GetOutputPort()).
+    """
+    assert isinstance(input_, (vtkPolyData, vtkAlgorithmOutput,))
+    averager = vtkPointDataToCellData()
+    averager.ProcessAllArraysOff()
+    averager.PassPointDataOn()
+    if isinstance(input_, vtkPolyData):
+        averager.SetInputData(input_)
+    else:
+        averager.SetInputConnection(input_)
+    averager.AddPointDataArray("Normals")
+
+    averager2 = vtkCellDataToPointData()
+    averager2.ProcessAllArraysOff()
+    averager2.PassCellDataOn()
+    averager2.SetInputConnection(averager.GetOutputPort())
+    averager2.AddCellDataArray("Normals")
+    averager2.Update()
+
+    result = averager2.GetOutput()
+    normals = vtk_to_numpy(result.GetPointData().GetNormals())
+    normals /= norm(normals, axis=1)[:, newaxis]
+    normals = numpy_to_vtk(normals)
+    result.GetPointData().SetNormals(numpy_to_vtk(normals))
+
+    return result
+
+def numpy_to_points(points: ndarray) -> vtkPoints:
+    result = vtkPoints()
+    for coordinate in points:
+        result.InsertNextPoint(coordinate)
+    return result
+
+def points_to_numpy(points: vtkPoints) -> ndarray:
+    pass
