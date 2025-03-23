@@ -40,7 +40,7 @@ from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 from .util import (
     calculate_curvature,
-    load_points,
+    load_markers,
     load_stl,
     n_greatest_values,
     PointMode,
@@ -423,8 +423,7 @@ class MainWindow(QMainWindow):
         previous_mode = self.current_mode
         for mode in PointMode:
             self.current_mode = mode
-            point_data: List[Tuple[float, float, float]] = load_points(self.filename + ".csv", mode)
-            points, normals = zip(*point_data) if point_data else ([], [],)
+            points, normals = load_markers(self.filename + ".csv", mode)
             self.set_points(points, normals)
         self.current_mode = previous_mode
         self.renderer.GetRenderWindow().Render()

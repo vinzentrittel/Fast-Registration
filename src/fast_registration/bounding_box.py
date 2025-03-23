@@ -11,7 +11,7 @@ from numpy import (
     ones,
     zeros,
 )
-from numpy.linalg import inv, norm, solve
+from numpy.linalg import inv, norm, pinv, solve
 from vtk import vtkPolyData, vtkSTLReader
 from vtk.util.numpy_support import vtk_to_numpy
 from slic3r_display import Slic3rBoxRepresentable
@@ -74,6 +74,35 @@ class BoundingBox:
         self.center = solve(self.axes, minimums) + self.axes.dot(self.length / 2.0)
 
         self.transform_matrix = self._calc_normalization_matrix()
+
+    @property
+    def inverse_transform_matrix(self) -> ndarray:
+        """
+        Non trivial 4x4 inversion matrix, that takes translation into account.
+        """
+        offset = -self.axes.dot(self.length) / 2.0 + self.center
+        translation = array([
+            [1, 0, 0, offset[0]],
+            [0, 1, 0, offset[1]],
+            [0, 0, 1, offset[2]],
+            [0, 0, 0, 1],
+        ])
+        scale = identity(4) * [
+            1.0 / self.length[0],
+            1.0 / self.length[1],
+            1.0 / self.length[2],
+            1.0,
+        ]
+        normalization = inv([
+            [ *self.axes[:, 0], 0 ],
+            [ *self.axes[:, 1], 0 ],
+            [ *self.axes[:, 2], 0 ],
+            [ 0, 0, 0, 1 ],
+        ])
+        half_in_size = array([[0.5,0,0,0], [0,0.5,0,0],[0,0,0.5,0],[0,0,0,1]])
+        center_to_origin = array([[1,0,0,0.5],[0,1,0,0.5],[0,0,1,0.5],[0,0,0,1]])
+
+        return translation.dot(inv(normalization)).dot(inv(scale)).dot(center_to_origin).dot(half_in_size)
 
     @staticmethod
     def _normalize(vector: ndarray) -> ndarray:

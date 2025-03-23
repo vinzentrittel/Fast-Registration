@@ -86,7 +86,7 @@ class PointMode(Enum):
     POI = 0
     SCALE_HANDLE = auto()
 
-def load_points(
+def load_markers(
     filename: Path, mode: PointMode, points: vtkPoints=None, normals: vtkDataArray=None
 ) -> List[Tuple[float, float, float]]:
     """
@@ -120,7 +120,7 @@ def load_points(
         for point, normal in result:
             points.InsertNextPoint(point)
             normals.InsertNextTuple(normal)
-    return result
+    return tuple(zip(*result)) if result else ([], [],)
 
 
 def write(obj: Any, filename: Path) -> None:

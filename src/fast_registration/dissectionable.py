@@ -76,12 +76,12 @@ class Dissectionable:
         ):
             vertices = clip.GetPoints()
             if vertices is not None and vertices.GetNumberOfPoints() > 0:
-                vertices = vtk_to_numpy(clip.GetPoints().GetData())
-                length = vertices.dot(projection).max()
-                new_point = 2.0 * length * direction
+                new_point = (
+                    vtk_to_numpy(vertices.GetData()).sum(axis=0) / vertices.GetNumberOfPoints()
+                )
                 projections.append(new_point)
             else:
-                projections.append(array([0, 0, 0]))
+                projections.append(array(projection))
         back_projections = ones((len(projections), 4,))
         back_projections[:, :3] = array(projections)
         return array(projections)
