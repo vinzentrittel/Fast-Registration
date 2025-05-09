@@ -53,6 +53,8 @@ from vtk import ( # pylint: disable=no-name-in-module
     vtkDataArray,
     vtkDecimatePro,
     vtkDoubleArray,
+    vtkIdList,
+    vtkIdTypeArray,
     vtkPointDataToCellData,
     vtkPoints,
     vtkPolyData,
@@ -63,6 +65,21 @@ from vtk import ( # pylint: disable=no-name-in-module
     vtkTransformPolyDataFilter,
 )
 from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy # pylint: disable=import-error,no-name-in-module
+
+def to_lps(geometry: vtkPolyData) -> vtkPolyData:
+    """
+    Some geometries are in a different coordinate system.
+    This function fixes the issue.
+    """
+    transform_ = vtkTransform()
+    transform_.Scale(-1, -1, 1)
+    transform_.RotateX(-90)
+
+    transform_filter = vtkTransformPolyDataFilter()
+    transform_filter.SetTransform(transform_)
+    transform_filter.SetInputData(geometry)
+    transform_filter.Update()
+    return transform_filter.GetOutput()
 
 def load_stl(filename: str) -> vtkPolyData:
     """
@@ -136,6 +153,7 @@ def write(obj: Any, filename: Path) -> None:
     filename - path to store the file.
     """
     from .bounding_box import BoundingBox # pylint: disable=import-outside-toplevel
+    print(type(obj))
 
     if isinstance(obj, BoundingBox):
         Slic3rBoxRepresentable.write_from(
@@ -146,6 +164,7 @@ def write(obj: Any, filename: Path) -> None:
     elif isinstance(obj, vtkPolyData):
         writer = vtkSTLWriter()
         writer.SetFileName(str(filename))
+        writer.SetFileTypeToBinary()
         writer.SetInputData(obj)
         writer.Update()
     elif isinstance(obj, ndarray) and obj.ndim == 2 and obj.shape[1] == 3:
@@ -184,7 +203,6 @@ def calculate_curvature(source: vtkPolyData) -> vtkDoubleArray:
     else:
         curvatures.SetCurvatureTypeToMean()
     curvatures.SetInputData(source)
-    #curvatures.Update()
 
     averager = vtkPointDataToCellData()
     averager.SetInputConnection(curvatures.GetOutputPort())
@@ -194,14 +212,34 @@ def calculate_curvature(source: vtkPolyData) -> vtkDoubleArray:
     #return curvatures.GetOutput().GetPointData().GetAbstractArray(CURVATURE_TYPE)
     return back_averager.GetOutput().GetPointData().GetAbstractArray(CURVATURE_TYPE)
 
+def generate_neighbor_list(geometry: vtkPolyData) -> List[Tuple[int, int]]:
+    neighbors = [[] for _ in range(geometry.GetNumberOfPoints())]
+    geometry.BuildPointLocator()
+    locator = geometry.GetPointLocator()
+    for point_id in range(geometry.GetNumberOfPoints()):
+        neighbor_ids = vtkIdList()
+        locator.FindClosestNPoints(25, geometry.GetPoint(point_id), neighbor_ids)
+        for n in range(neighbor_ids.GetNumberOfIds()):
+            neighbor_id = neighbor_ids.GetId(n)
+            neighbors[point_id].append(neighbor_id)
+            neighbors[neighbor_id].append(point_id)
+
+    neighbors[:] = [list(set(n)) for n in neighbors]
+    return [
+        (first, second,)
+        for first, neighbors in enumerate(neighbors)
+        for second in neighbors
+    ]
+
 def n_greatest_values(array_: vtkDoubleArray, n: int) -> vtkDoubleArray:
     """
     For a given VTK array, marke each of the n greatest values with 1.0.
     Else 0.0.
     """
-    numpy_array = vtk_to_numpy(array_)
-    filter_mask = zeros(len(numpy_array))
-    filter_mask[argpartition(-numpy_array, n)[:n]] = 1.0
+    if not isinstance(array_, ndarray):
+        array_ = vtk_to_numpy(array_)
+    filter_mask = zeros(len(array_))
+    filter_mask[argpartition(-array_, n)[:n]] = 1.0
     return numpy_to_vtk(filter_mask)
 
 def remesh(geometry: vtkPolyData, cluster_count: int, decimate: bool=False) -> vtkPolyData:
@@ -236,6 +274,30 @@ def smooth_normals(input_: Union[vtkPolyData, vtkAlgorithmOutput]) -> vtkPolyDat
     Keyword Arguments:
     input_ - vtkPolyData object or an algorithms output (see GetOutputPort()).
     """
+    result = _average_point_data(input_, data_array_name="Normals")
+    normals = vtk_to_numpy(result.GetPointData().GetNormals())
+    normals /= norm(normals, axis=1)[:, newaxis]
+    #normals = numpy_to_vtk(normals)
+    result.GetPointData().SetNormals(numpy_to_vtk(normals))
+
+    return result
+
+def average_curvature(input_: vtkPolyData) -> vtkPolyData:
+    return _average_point_data(input_, data_array_name=CURVATURE_TYPE)
+
+def _average_point_data(
+    input_: Union[vtkPolyData, vtkAlgorithmOutput], data_array_name: str
+) -> vtkPolyData:
+    """
+    Interpolate the VTK data array values of the array 'data_array_name' by their surrounding cells.
+    To work properly the data array must have previously been calculated and be available
+    for the "input_"'s PointData instance.
+
+    Return a whole new vtkPolyData object. The input is left untouched.
+
+    Keyword Arguments:
+    input_ - vtkPolyData object or an algorithms output (see GetOutputPort()).
+    """
     assert isinstance(input_, (vtkPolyData, vtkAlgorithmOutput,))
     averager = vtkPointDataToCellData()
     averager.ProcessAllArraysOff()
@@ -244,22 +306,24 @@ def smooth_normals(input_: Union[vtkPolyData, vtkAlgorithmOutput]) -> vtkPolyDat
         averager.SetInputData(input_)
     else:
         averager.SetInputConnection(input_)
-    averager.AddPointDataArray("Normals")
+    averager.AddPointDataArray(data_array_name)
 
     averager2 = vtkCellDataToPointData()
     averager2.ProcessAllArraysOff()
     averager2.PassCellDataOn()
     averager2.SetInputConnection(averager.GetOutputPort())
-    averager2.AddCellDataArray("Normals")
+    averager2.AddCellDataArray(data_array_name)
     averager2.Update()
 
-    result = averager2.GetOutput()
-    normals = vtk_to_numpy(result.GetPointData().GetNormals())
-    normals /= norm(normals, axis=1)[:, newaxis]
-    normals = numpy_to_vtk(normals)
-    result.GetPointData().SetNormals(numpy_to_vtk(normals))
+    return averager2.GetOutput()
 
-    return result
+def id_list_to_array(id_list: vtkIdList) -> vtkIdTypeArray:
+    array_ = vtkIdTypeArray()
+    array_.SetNumberOfComponents(1)
+    array_.SetNumberOfTuples(id_list.GetNumberOfIds())
+    for index in range(id_list.GetNumberOfIds()):
+        array_.InsertNextValue(id_list.GetId(index))
+    return array_
 
 def numpy_to_points(points: ndarray) -> vtkPoints:
     result = vtkPoints()

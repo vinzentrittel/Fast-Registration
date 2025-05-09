@@ -8,6 +8,7 @@ from time import sleep
 from threading import Timer
 from typing import List, Tuple
 
+from numpy import multiply
 from PyQt5.QtCore import Qt # pylint: disable=no-name-in-module
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent # pylint: disable=no-name-in-module
 from PyQt5.QtWidgets import ( # pylint: disable=no-name-in-module
@@ -18,6 +19,7 @@ from PyQt5.QtWidgets import ( # pylint: disable=no-name-in-module
     QVBoxLayout,
     QWidget,
 )
+from slic3r_display import Slic3rPointRepresentable
 from vtk import ( # pylint: disable=no-name-in-module
     vtkActor,
     vtkCellArray,
@@ -37,6 +39,7 @@ from vtk import ( # pylint: disable=no-name-in-module
     vtkTextWidget,
 )
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 from .util import (
     calculate_curvature,
@@ -48,6 +51,7 @@ from .util import (
     smooth_normals,
     remesh,
 )
+from .alt_identity_clipper import calculate_curved_sections
 
 class MainWindow(QMainWindow):
     """
@@ -503,8 +507,14 @@ class MainWindow(QMainWindow):
                 self.renderer.GetRenderWindow().Render()
                 return
 
-            curvatures = calculate_curvature(self.geometry)
-            scalars = n_greatest_values(curvatures, n=int(self.geometry.GetNumberOfPoints() / 2))
+            (
+                mask, weighted_curvatures, mean_curvatures,
+            ) = calculate_curved_sections(self.geometry)
+            scalars = n_greatest_values(
+                mean_curvatures, n=int(self.geometry.GetNumberOfPoints() / 2)
+            )
+
+            scalars = numpy_to_vtk(multiply(vtk_to_numpy(mask), vtk_to_numpy(scalars)))
             scalars.SetName("ColorGroups")
             self.geometry.GetPointData().SetScalars(scalars)
 
