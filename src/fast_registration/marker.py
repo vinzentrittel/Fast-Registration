@@ -1,15 +1,17 @@
 """
 This module provides an interface for a user to provide landmarks for a given STL geometry.
 """
+from pdb import set_trace as break_
+from concurrent.futures import ThreadPoolExecutor
 from csv import DictWriter
-from os.path import basename
+from os.path import basename, isfile
 from re import compile as Regex
 from time import sleep
 from threading import Timer
 from typing import List, Tuple
 
-from numpy import multiply
-from PyQt5.QtCore import Qt # pylint: disable=no-name-in-module
+from numpy import multiply, zeros
+from PyQt5.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot # pylint: disable=no-name-in-module
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent # pylint: disable=no-name-in-module
 from PyQt5.QtWidgets import ( # pylint: disable=no-name-in-module
     QApplication,
@@ -43,6 +45,7 @@ from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 from .util import (
     calculate_curvature,
+    CURVATURE_TYPE,
     load_markers,
     load_stl,
     n_greatest_values,
@@ -51,7 +54,7 @@ from .util import (
     smooth_normals,
     remesh,
 )
-from .alt_identity_clipper import calculate_curved_sections
+from .alt_identity_clipper import calculate_curved_sections, WEIGHTED_CURVATURE_TYPE
 
 class MainWindow(QMainWindow):
     """
@@ -74,6 +77,8 @@ class MainWindow(QMainWindow):
         self.vtk_widget.GetRenderWindow().Render()
         self.vtk_widget.Start()
 
+    start_curvature_calculation = pyqtSignal(object)
+
     @property
     def geometry(self) -> vtkPolyData:
         """
@@ -92,12 +97,21 @@ class MainWindow(QMainWindow):
         normals.SetInputData(new_geometry)
         new_geometry = smooth_normals(normals.GetOutputPort())
 
+        curvatures = numpy_to_vtk(zeros(new_geometry.GetNumberOfPoints()))
+        curvatures.SetName(CURVATURE_TYPE)
+        new_geometry.GetPointData().AddArray(curvatures)
+
+        weighted_curvatures = numpy_to_vtk(zeros(new_geometry.GetNumberOfPoints()))
+        weighted_curvatures.SetName(WEIGHTED_CURVATURE_TYPE)
+        new_geometry.GetPointData().AddArray(weighted_curvatures)
+
         self.geometry_mapper.SetInputData(new_geometry)
         self.geometry_mapper.SetScalarVisibility(False)
 
-        self.text = f"Loaded {new_geometry.GetNumberOfPoints()} vertices."
         self.renderer.ResetCamera()
         self.vtk_widget.GetRenderWindow().Render()
+
+        self.reset_points()
 
     @property
     def points(self) -> None:
@@ -122,6 +136,14 @@ class MainWindow(QMainWindow):
         The set of normals returned depends on the currently selected PointMode.
         """
         return self.points.GetPointData().GetNormals()
+
+    @property
+    def curvatures(self) -> vtkDataArray:
+        return self.points.GetPointData().GetAbstractArray(CURVATURE_TYPE)
+
+    @property
+    def weighted_curvatures(self) -> None:
+        return self.points.GetPointData().GetAbstractArray(WEIGHTED_CURVATURE_TYPE)
 
     @property
     def current_mode(self) -> PointMode:
@@ -220,6 +242,13 @@ class MainWindow(QMainWindow):
         self.text_widget.GetTextActor().SetInput("Drop STL file")
         self.text_widget.On()
 
+        self.curvature_calculation = self.CurvatureCalculation()
+        self.thread = QThread()
+        self.curvature_calculation.moveToThread(self.thread)
+        self.curvature_calculation.curvatures.connect(self.update_curvatures)
+        self.start_curvature_calculation.connect(self.curvature_calculation.__call__)
+        self.thread.start()
+
     def _setup_vertex_picking(self):
         """
         Initializing everything that has to do with adding new landmarks to an STL mesh.
@@ -252,6 +281,16 @@ class MainWindow(QMainWindow):
             normals.SetName("Normals")
             normals.SetNumberOfComponents(3)
             self._points[-1].GetPointData().SetNormals(normals)
+
+            curvatures = vtkFloatArray()
+            curvatures.SetName(CURVATURE_TYPE)
+            curvatures.SetNumberOfComponents(1)
+            self._points[-1].GetPointData().AddArray(curvatures)
+
+            weighted_curvatures = vtkFloatArray()
+            weighted_curvatures.SetName(WEIGHTED_CURVATURE_TYPE)
+            weighted_curvatures.SetNumberOfComponents(1)
+            self._points[-1].GetPointData().AddArray(weighted_curvatures)
 
             self._point_mappers.append(vtkPolyDataMapper())
             self._point_mappers[-1].SetInputData(self._points[-1])
@@ -296,6 +335,9 @@ class MainWindow(QMainWindow):
                 self.add_point(
                     new_point=self.geometry.GetPoint(point_id),
                     new_normal=self.geometry.GetPointData().GetNormals().GetTuple(point_id),
+                    new_curvature=self.geometry.GetPointData().GetAbstractArray(CURVATURE_TYPE).GetTuple(point_id),
+                    new_weighted_curvature= \
+                        self.geometry.GetPointData().GetAbstractArray(WEIGHTED_CURVATURE_TYPE).GetTuple(point_id),
                 )
             elif self.right_button_pressed                  \
                 and self.points.GetNumberOfPoints() > 0     \
@@ -309,7 +351,11 @@ class MainWindow(QMainWindow):
         self.right_button_pressed = False
 
     def add_point(
-        self, new_point: Tuple[float, float, float], new_normal: Tuple[float, float, float]
+        self,
+        new_point: Tuple[float, float, float],
+        new_normal: Tuple[float, float, float],
+        new_curvature: float,
+        new_weighted_curvature: float,
     ) -> None:
         """
         Insert a new point to the current set of points. The expanded point set depends on the
@@ -321,6 +367,10 @@ class MainWindow(QMainWindow):
         """
         new_point_id = self.points.GetPoints().InsertNextPoint(new_point)
         self.points.GetPointData().GetNormals().InsertTuple3(new_point_id, *new_normal)
+        self.points.GetPointData().GetAbstractArray(CURVATURE_TYPE).InsertTuple1(new_point_id, *new_curvature)
+        self.points.GetPointData().GetAbstractArray(WEIGHTED_CURVATURE_TYPE).InsertTuple1(
+            new_point_id, *new_curvature
+        )
         self.points.GetVerts().InsertNextCell(1)
         self.points.GetVerts().InsertCellPoint(new_point_id)
         self.points.GetVerts().Modified()
@@ -353,6 +403,16 @@ class MainWindow(QMainWindow):
                 for id_ in range(self.normals.GetNumberOfTuples())
                 if id_ != point_id
             ],
+            new_curvatures=[
+                self.curvatures.GetTuple1(id_)
+                for id_ in range(self.curvatures.GetNumberOfTuples())
+                if id_ != point_id
+            ],
+            new_weighted_curvatures=[
+                self.weighted_curvatures.GetTuple1(id_)
+                for id_ in range(self.curvatures.GetNumberOfTuples())
+                if id_ != point_id
+            ],
         )
         self.write()
 
@@ -360,6 +420,8 @@ class MainWindow(QMainWindow):
         self,
         new_points: List[Tuple[float, float, float]],
         new_normals: List[Tuple[float, float, float]],
+        new_curvatures: List[float],
+        new_weighted_curvatures: List[float],
     ) -> None:
         """
         Assign a fresh list of 3D coordinates to the currently selected point set.
@@ -376,9 +438,21 @@ class MainWindow(QMainWindow):
         normals = vtkFloatArray()
         normals.SetName("Normals")
         normals.SetNumberOfComponents(3)
-        for point, normal in zip(new_points, new_normals):
+        curvatures = vtkFloatArray()
+        curvatures.SetName(CURVATURE_TYPE)
+        curvatures.SetNumberOfTuples(1)
+        weighted_curvatures = vtkFloatArray()
+        weighted_curvatures.SetName(WEIGHTED_CURVATURE_TYPE)
+        weighted_curvatures.SetNumberOfComponents(1)
+        for (
+            point, normal, curvature, weighted_curvature,
+        )in zip(
+            new_points, new_normals, new_curvatures, new_weighted_curvatures
+        ):
             point_id = points.InsertNextPoint(point)
             normals.InsertTuple(point_id, normal)
+            curvatures.InsertTuple1(point_id, curvature)
+            weighted_curvatures.InsertTuple1(point_id, weighted_curvature)
             verts.InsertNextCell(1)
             verts.InsertCellPoint(point_id)
         self.points.SetPoints(points)
@@ -387,13 +461,15 @@ class MainWindow(QMainWindow):
         self.points.GetVerts().Modified()
         self.points.Modified()
         self.points.GetPointData().SetNormals(normals)
+        self.points.GetPointData().AddArray(curvatures)
+        self.points.GetPointData().AddArray(weighted_curvatures)
         self.points.Modified()
         self.points.BuildCells()
         self.points.BuildLinks()
         self.point_mapper.Update()
         self.renderer.GetRenderWindow().Render()
 
-    def write(self) -> None:
+    def write(self, auto_prompt: bool=True) -> None:
         """
         Write point sets for all PointModes in a CSV file.
         The CSV file will have the same file name as the previously loaded STL mesh file, but
@@ -410,13 +486,18 @@ class MainWindow(QMainWindow):
                 for id_ in range(self.points.GetNumberOfPoints()):
                     row = dict(zip(
                         POINTS_HEADER,
-                        self.points.GetPoint(id_) + self.normals.GetTuple(id_) + (mode.name,),
+                        self.points.GetPoint(id_)                    \
+                            + self.normals.GetTuple(id_)             \
+                            + self.curvatures.GetTuple(id_)          \
+                            + self.weighted_curvatures.GetTuple(id_) \
+                            + (mode.name,),
                     ))
                     csv.writerow(row)
-        self.text = f"Written to '{basename(self.filename) + '.csv'}'"
+        if auto_prompt:
+            self.text = f"Written to '{basename(self.filename) + '.csv'}'"
         self.current_mode = previous_mode
 
-    def read(self) -> None:
+    def read(self) -> bool:
         """
         Read all point sets for all PointModes from a CSV file.
         The CSV file should have the same file name as the previously loaded STL mesh file, but
@@ -424,11 +505,24 @@ class MainWindow(QMainWindow):
 
         'L1.stl' -> 'L1.stl.csv'
         """
+        filename = f"{self.filename}.csv"
+        if not isfile(filename):
+            return False
+
         previous_mode = self.current_mode
         for mode in PointMode:
             self.current_mode = mode
-            points, normals = load_markers(self.filename + ".csv", mode)
-            self.set_points(points, normals)
+            points, normals, curvatures, weighted_curvatures = load_markers(filename, mode)
+            self.set_points(points, normals, curvatures, weighted_curvatures)
+        self.current_mode = previous_mode
+        self.renderer.GetRenderWindow().Render()
+        return True
+
+    def reset_points(self) -> None:
+        previous_mode = self.current_mode
+        for mode in PointMode:
+            self.current_mode = mode
+            self.set_points([], [], [], [])
         self.current_mode = previous_mode
         self.renderer.GetRenderWindow().Render()
 
@@ -436,6 +530,8 @@ class MainWindow(QMainWindow):
         self,
         new_points: List[Tuple[float, float, float]],
         new_normals: List[Tuple[float, float, float]],
+        new_curvatures: List[float],
+        new_weighted_curvatures: List[float],
     ) -> None:
         """
         Add a list of 3D coordinates to the currently selected point set.
@@ -449,7 +545,20 @@ class MainWindow(QMainWindow):
         """
         old_points = [self.points.GetPoint(id_) for id_ in range(self.points.GetNumberOfPoints())]
         old_normals = [self.normals.GetTuple(id_) for id_ in range(self.points.GetNumberOfPoints())]
-        self.set_points(old_points + new_points, old_normals + new_normals)
+        old_curvatures = [
+            self.curvatures.GetTuple1(id_) for id_ in range(self.points.GetNumberOfPoints())
+        ]
+        old_weighted_curvatures = [
+            self.weighted_curvatures.GetTuple1(id_)
+            for id_ in range(self.points.GetNumberOfPoints())
+        ]
+
+        self.set_points(
+            old_points + new_points,
+            old_normals + new_normals,
+            old_curvatures + new_curvatures,
+            old_weighted_curvatures + new_weighted_curvatures,
+        )
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None: # pylint: disable=invalid-name
         """
@@ -477,7 +586,12 @@ class MainWindow(QMainWindow):
             if filename.endswith(".stl"):
                 self.filename = filename
                 self.geometry = load_stl(filename)
-                self.read()
+                exists_offline_data = self.read()
+                if not exists_offline_data:
+                    self.text = "Generating auto-landmarks..."
+                    self.start_curvature_calculation.emit(self.geometry)
+                else:
+                    self.text = f"Loaded {self.geometry.GetNumberOfPoints()} vertices."
                 event.accept()
             elif filename.endswith(".mrk.json"):
                 regex = Regex(r"""\"position\":\s*\[([^,]+),\s*([^,]+),\s*([^,]+)],""")
@@ -490,12 +604,73 @@ class MainWindow(QMainWindow):
                     )
                     for position in positions
                 ]
-                self.append_points(new_points=positions, new_normals=normals)
+                curvatures = [
+                    self.geometry.GetPointData().GetAbstractArray(CURVATURE_TYPE).GetTuple(
+                        self.geometry.GetPointLocator().FindClosesPoint(position)
+                    )
+                    for position in positions
+                ]
+                weighted_curvatures = [
+                    self.geometry.GetPointData().GetAbstractArray(WEIGHTED_CURVATURE_TYPE).GetTuple(
+                        self.geometry.GetPointLocator().FindClosesPoint(position)
+                    )
+                    for position in positions
+                ]
+                self.append_points(
+                    new_points=positions, new_normals=normals, new_curvatures=curvatures, new_weighted_curvatures=weighted_curvatures
+                )
                 event.accept()
             else:
                 event.ignore()
         else:
             event.ignore()
+
+    class CurvatureCalculation(QObject):
+        curvatures = pyqtSignal(tuple)
+
+        @pyqtSlot(object)
+        def __call__(self, geometry: vtkPolyData) -> None:
+            mask, weighted_curvatures, curvatures = calculate_curved_sections(geometry)
+            significant = n_greatest_values(
+                curvatures, n=int(geometry.GetNumberOfPoints() / 2)
+            )
+
+            mask = [
+                mask.GetTuple1(n) == 1 and significant.GetTuple1(n)
+                for n in range(geometry.GetNumberOfPoints())
+            ]
+            self.curvatures.emit((mask, weighted_curvatures, curvatures,))
+
+    @pyqtSlot(tuple)
+    def update_curvatures(self, curvatures: Tuple[List[bool], vtkFloatArray, vtkFloatArray]) -> None:
+        # add all curvatures to geometry
+        mask, weighted_curvatures, curvatures = curvatures
+        curvatures = numpy_to_vtk(curvatures)
+        curvatures.SetName(CURVATURE_TYPE)
+        self.geometry.GetPointData().AddArray(curvatures)
+        weighted_curvatures = numpy_to_vtk(weighted_curvatures)
+        weighted_curvatures.SetName(WEIGHTED_CURVATURE_TYPE)
+        self.geometry.GetPointData().AddArray(weighted_curvatures)
+
+        # collect all geometry info for landmarks
+        (
+            new_points, new_normals, new_curvatures, new_weighted_curvatures,
+        ) = [], [], [], []
+        for point_id, flag in enumerate(mask):
+            if not flag:
+                continue
+            new_points.append(self.geometry.GetPoint(point_id))
+            new_normals.append(self.geometry.GetPointData().GetNormals().GetTuple(point_id))
+            new_curvatures.append(curvatures.GetTuple1(point_id))
+            new_weighted_curvatures.append(weighted_curvatures.GetTuple1(point_id))
+
+        # add landmark points to the data representation
+        previous_mode = self.current_mode
+        self.current_mode = PointMode.SCALE_HANDLE
+        self.set_points(new_points, new_normals, new_curvatures, new_weighted_curvatures)
+        self.current_mode = previous_mode
+        self.write(auto_prompt=False)
+        self.text = "Generated auto-landmarks"
 
     def keyReleaseEvent(self, event: QKeyEvent): # pylint: disable=invalid-name
         """

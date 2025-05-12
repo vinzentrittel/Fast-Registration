@@ -93,7 +93,7 @@ def load_stl(filename: str) -> vtkPolyData:
     reader.Update()
     return reader.GetOutput()
 
-POINTS_HEADER = "x", "y", "z", "nx", "ny", "nz", "kind"
+POINTS_HEADER = "x", "y", "z", "nx", "ny", "nz", "c", "wc", "kind"
 CURVATURE_TYPE =  "Mean_Curvature" # or "Gauss_Curvature"
 
 class PointMode(Enum):
@@ -104,8 +104,18 @@ class PointMode(Enum):
     SCALE_HANDLE = auto()
 
 def load_markers(
-    filename: Path, mode: PointMode, points: vtkPoints=None, normals: vtkDataArray=None
-) -> List[Tuple[float, float, float]]:
+    filename: Path,
+    mode: PointMode,
+    points: vtkPoints=None,
+    normals: vtkDataArray=None,
+    curvatures: vtkDataArray=None,
+    weighted_curvatures: vtkDataArray=None,
+) -> Tuple[
+        List[Tuple[float, float, float]],
+        List[Tuple[float, float, float]],
+        List[float],
+        List[float],
+    ]:
     """
     Load points (Point of interest [POI], scale handle) and there respective normals from CSV files.
     Returns 3D points as a list of 3-tuples.
@@ -117,8 +127,16 @@ def load_markers(
     points - [optional] vtkPoint object, where the points shall be appended to.
     normals - [optional] vtkDataArray object, where the normals shall be appended to.
     """
-    if (points is None or normals is None) and points != normals:
-        raise ValueError("Provide vtkPoints and vtkDataArray to write to parameter objects")
+    if (
+        (points is None or normals is None or curvatures is None or weighted_curvatures is None)
+        and not (
+            points is None
+            and normals is None
+            and curvatures is None
+            and weighted_curvatures is None
+        )
+    ):
+        raise ValueError("Provide vtkPoints and vtkDataArrays to write to parameter objects")
     if not isfile(filename):
         rows = []
     else:
@@ -129,6 +147,8 @@ def load_markers(
         (
             (float(row_dict["x"]), float(row_dict["y"]), float(row_dict["z"]),),
             (float(row_dict["nx"]), float(row_dict["ny"]), float(row_dict["nz"]),),
+            float(row_dict["c"]),
+            float(row_dict["wc"]),
         )
         for row_dict in rows
         if row_dict["kind"] == mode.name
@@ -137,7 +157,7 @@ def load_markers(
         for point, normal in result:
             points.InsertNextPoint(point)
             normals.InsertNextTuple(normal)
-    return tuple(zip(*result)) if result else ([], [],)
+    return tuple(zip(*result)) if result else ([], [], [], [],)
 
 
 def write(obj: Any, filename: Path) -> None:
@@ -153,7 +173,6 @@ def write(obj: Any, filename: Path) -> None:
     filename - path to store the file.
     """
     from .bounding_box import BoundingBox # pylint: disable=import-outside-toplevel
-    print(type(obj))
 
     if isinstance(obj, BoundingBox):
         Slic3rBoxRepresentable.write_from(
