@@ -45,8 +45,9 @@ def apply_multifreq_noise(obj, max_disp, seed):
         amp = 1.0
         freq = base_freq
         n_total = 0.0
-        for _ in range(octaves):
-            n_total += noise.noise(p * freq) * amp
+        for iteration in range(octaves):
+            if iteration != 0:
+                n_total += noise.noise(p * freq) * amp
             freq *= lacunarity
             amp  *= gain
         disp = n_total * max_disp
