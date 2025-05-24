@@ -1,231 +1,301 @@
-"""
-This module provides an interface for a user to provide landmarks for a given STL geometry.
-"""
-from pdb import set_trace as break_
-from concurrent.futures import ThreadPoolExecutor
-from csv import DictWriter
-from os.path import basename, isfile
+from __future__ import annotations
+
+from csv import DictReader, DictWriter
+from dataclasses import dataclass, field
+from os.path import isfile
+from pathlib import Path
 from re import compile as Regex
-from time import sleep
 from threading import Timer
+from time import sleep
 from typing import List, Tuple
 
-from numpy import multiply, zeros
-from PyQt5.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot # pylint: disable=no-name-in-module
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent # pylint: disable=no-name-in-module
-from PyQt5.QtWidgets import ( # pylint: disable=no-name-in-module
+from numpy import argmin, zeros
+from numpy.linalg import norm
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QKeyEvent
+from PyQt5.QtWidgets import (
     QApplication,
     QMainWindow,
-    QPushButton,
-    QHBoxLayout,
     QVBoxLayout,
     QWidget,
 )
-from slic3r_display import Slic3rPointRepresentable
-from vtk import ( # pylint: disable=no-name-in-module
+from vtk import (
     vtkActor,
     vtkCellArray,
     vtkCellPicker,
-    vtkDataArray,
     vtkFloatArray,
     vtkInteractorStyleTrackballCamera,
-    vtkLookupTable,
+    vtkPointPicker,
     vtkPoints,
     vtkPolyData,
     vtkPolyDataMapper,
     vtkPolyDataNormals,
-    vtkRenderWindowInteractor,
     vtkRenderer,
+    vtkRenderWindowInteractor,
     vtkTextActor,
     vtkTextRepresentation,
     vtkTextWidget,
 )
-from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+
 from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
+from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
 from .util import (
-    calculate_curvature,
     CURVATURE_TYPE,
-    load_markers,
     load_stl,
     n_greatest_values,
-    PointMode,
     POINTS_HEADER,
+    PointMode,
     smooth_normals,
-    remesh,
 )
 from .alt_identity_clipper import calculate_curved_sections, WEIGHTED_CURVATURE_TYPE
 
-class MainWindow(QMainWindow):
-    """
-    GUI for marking landmarks on an STL mesh.
-    """
-    # pylint: disable=attribute-defined-outside-init,too-many-instance-attributes
-    def __init__(self) -> None:
+LEFT_BUTTON_PRESS_EVENT = "LeftButtonPressEvent"
+RIGHT_BUTTON_PRESS_EVENT = "RightButtonPressEvent"
+END_INTERACTION_EVENT = "EndInteractionEvent"
+
+@dataclass
+class Landmark:
+    point: Tuple[float, float, float] = field(default_factory=tuple)
+    normal: Tuple[float, float, float] = field(default_factory=tuple)
+    curvature: float = 0.0
+    weighted_curvature: float = 0.0
+    mode: PointMode = None
+
+    @classmethod
+    def at(cls, point_id: int, mesh: vtkPolyData, mode: PointMode) -> Landmark:
+        return cls(
+            point=mesh.GetPoint(point_id),
+            normal=mesh.GetPointData().GetNormals().GetTuple(point_id),
+            curvature=mesh.GetPointData().GetAbstractArray(CURVATURE_TYPE).GetTuple1(point_id),
+            weighted_curvature=mesh.GetPointData().GetAbstractArray(
+                WEIGHTED_CURVATURE_TYPE
+            ).GetTuple1(point_id),
+            mode=mode,
+        )
+
+def _path_to_csv(path: Path) -> Path:
+    return Path(path.parent, f"{path.stem}.csv")
+
+def save_landmarks(landmarks: List[Landmark], path: Path) -> None:
+    with open(_path_to_csv(path), "w", encoding="utf-8") as csv_file:
+        writer = DictWriter(csv_file, fieldnames=POINTS_HEADER)
+        writer.writeheader()
+        for landmark in landmarks:
+            writer.writerow({
+                **dict(zip(
+                    POINTS_HEADER,
+                    (
+                        landmark.point
+                        + landmark.normal
+                        + (landmark.curvature,)
+                        + (landmark.weighted_curvature,)
+                        + (landmark.mode.name,)
+                    )
+                ))
+            })
+
+def load_landmarks(path: Path) -> List[Landmark]:
+    if path.suffix == ".stl":
+        path = _path_to_csv(path)
+        if not path.is_file():
+            return []
+        with open(path, "r", encoding="utf-8") as csv_file:
+            reader = DictReader(csv_file)
+            result = []
+            for row in reader:
+                point = tuple(map(float, (row["x"], row["y"], row["z"],)))
+                normal = tuple(map(float, (row["nx"], row["ny"], row["nz"],)))
+                curvature = float(row["c"])
+                weighted_curvature = float(row["wc"])
+                mode = PointMode[row["kind"]]
+                result.append(Landmark(point, normal, curvature, weighted_curvature, mode))
+            return result
+    elif "".join(path.suffixes) == ".mrk.json":
+        regex = Regex(r"""\"position\":\s*\[([^,]+),\s*([^,]+),\s*([^,]+)],""")
+        with open(path, "r", encoding="utf-8") as markups_file:
+            json = "".join(markups_file.readlines())
+
+        result = []
+        for x, y, z in regex.findall(json):
+            point = float(x), float(y), float(z)
+            result.append(Landmark(
+                point,
+                normal=(0.0, 0.0, 0.0,),
+                curvature=0.0,
+                weighted_curvature=0.0,
+                mode=PointMode.POI,
+            ))
+        return result
+
+def load_geometry(path: Path) -> vtkPolyData:
+    assert path.suffix == ".stl", f"Attempt to load {path.suffix} as geometry failed"
+
+    mesh = load_stl(path)
+    normals = vtkPolyDataNormals()
+    normals.ComputePointNormalsOn()
+    normals.SplittingOff()
+    normals.SetInputData(mesh)
+    mesh = smooth_normals(normals.GetOutputPort())
+
+    for name in (CURVATURE_TYPE, WEIGHTED_CURVATURE_TYPE,):
+        float_array = numpy_to_vtk(zeros(mesh.GetNumberOfPoints()))
+        float_array.SetName(name)
+        mesh.GetPointData().AddArray(float_array)
+
+    return mesh
+
+def compute_curvature(mesh: vtkPolyData) -> List[Landmark]:
+    mask, weighted_curvatures, curvatures = calculate_curved_sections(mesh)
+    is_significant = n_greatest_values(curvatures, n=int(mesh.GetNumberOfPoints() / 2))
+
+    landmarks = []
+    for id_ in range(mesh.GetNumberOfPoints()):
+        if mask.GetTuple1(id_) and is_significant.GetTuple1(id_):
+            point = mesh.GetPoint(id_)
+            normal = mesh.GetPointData().GetNormals().GetTuple(id_)
+            landmarks.append(
+                Landmark(
+                    point,
+                    normal,
+                    curvatures.GetTuple1(id_),
+                    weighted_curvatures.GetTuple1(id_),
+                    PointMode.SCALE_HANDLE,
+                )
+            )
+    return landmarks
+
+class CurvatureWorker(QThread):
+    finished = pyqtSignal(list)
+
+    def __init__( self, mesh: vtkPolyData):
         super().__init__()
+        self.mesh = mesh
 
-        self._setup_window()
-        self._setup_vertex_picking()
-        self.filename = ""
+    def run(self):
+        landmarks = compute_curvature(self.mesh)
+        self.finished.emit(landmarks)
 
-        # add elements for geometry display
-        self.geometry_mapper = vtkPolyDataMapper()
-        geometry_actor = vtkActor()
-        geometry_actor.SetMapper(self.geometry_mapper)
-        self.renderer.AddActor(geometry_actor)
+class LandmarksManager:
+    def __init__(self):
+        self.landmarks: List[Landmark] = []
+        self.landmarks_representation = vtkPolyData()
+        self.set_all([])
 
-        self.vtk_widget.GetRenderWindow().Render()
+    def add(self, landmark: Landmark) -> None:
+        self.landmarks.append(landmark)
+
+        point_id = self.landmarks_representation.GetPoints().InsertNextPoint(landmark.point)
+        self.landmarks_representation.GetPointData().GetNormals().InsertTuple(point_id, landmark.normal)
+        self.landmarks_representation.GetPointData().GetAbstractArray(CURVATURE_TYPE).InsertTuple1(
+            point_id, landmark.curvature
+        )
+        self.landmarks_representation.GetPointData().GetAbstractArray(WEIGHTED_CURVATURE_TYPE).InsertTuple1(
+            point_id, landmark.weighted_curvature
+        )
+        self.landmarks_representation.GetVerts().InsertNextCell(1)
+        self.landmarks_representation.GetVerts().InsertCellPoint(point_id)
+        self.landmarks_representation.GetVerts().Modified()
+        self.landmarks_representation.GetPoints().Modified()
+        self.landmarks_representation.Modified()
+        self.landmarks_representation.BuildCells()
+        self.landmarks_representation.BuildLinks()
+
+    def remove(self, index: int) -> None:
+        self.landmarks.pop(index)
+        self.set_all(self.landmarks)
+
+    def remove_by_location(self, location: Tuple[float, float, float]) -> None:
+        if len(self.landmarks) == 0:
+            return
+        self.landmarks_representation.BuildPointLocator()
+        point_id = self.landmarks_representation.GetPointLocator().FindClosestPoint(location)
+        self.remove(point_id)
+
+    def set_all(self, landmarks: List[Landmark]) -> None:
+        self.landmarks = landmarks.copy()
+        points = vtkPoints()
+        cells = vtkCellArray()
+        normals = self.make_array("Normals", number_of_components=3)
+        curvatures = self.make_array(CURVATURE_TYPE)
+        weighted_curvatures = self.make_array(WEIGHTED_CURVATURE_TYPE)
+
+        for landmark in landmarks:
+            point_id = points.InsertNextPoint(landmark.point)
+            normals.InsertTuple(point_id, landmark.normal)
+            curvatures.InsertTuple1(point_id, landmark.curvature)
+            weighted_curvatures.InsertTuple1(point_id, landmark.weighted_curvature)
+            cells.InsertNextCell(1)
+            cells.InsertCellPoint(point_id)
+
+        self.landmarks_representation.SetPoints(points)
+        self.landmarks_representation.SetVerts(cells)
+        self.landmarks_representation.Modified()
+        self.landmarks_representation.GetPointData().SetNormals(normals)
+        self.landmarks_representation.GetPointData().AddArray(curvatures)
+        self.landmarks_representation.GetPointData().AddArray(weighted_curvatures)
+        self.landmarks_representation.Modified()
+        self.landmarks_representation.BuildCells()
+        self.landmarks_representation.BuildLinks()
+
+    def update(self, mesh: vtkPolyData) -> None:
+        mesh.BuildPointLocator()
+        locator = mesh.GetPointLocator()
+        poi_info = [
+            Landmark.at(
+                point_id=locator.FindClosestPoint(l.point),
+                mesh=mesh,
+                mode=l.mode
+            )
+            for l in self.landmarks
+        ]
+        detailed_poi = [
+            Landmark(l.point, i.normal, i.curvature, i.weighted_curvature, l.mode)
+            for l, i in zip(self.landmarks, poi_info)
+        ]
+        self.set_all(detailed_poi)
+
+    @staticmethod
+    def make_array(name: str, number_of_components: int=1) -> vtkFloatArray:
+        new_array = vtkFloatArray()
+        new_array.SetName(name)
+        new_array.SetNumberOfComponents(number_of_components)
+        return new_array
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.mesh: vtkPolyData = None
+        self.path = Path()
+        self.landmarks_manager = LandmarksManager()
+        self.poi_manager = LandmarksManager()
+        self.mouse_position = -1, -1
+        self.latest_event = None
+
+        self._setup_ui()
+
+        self.render()
         self.vtk_widget.Start()
 
-    start_curvature_calculation = pyqtSignal(object)
-
-    @property
-    def geometry(self) -> vtkPolyData:
-        """
-        Return currently loaded STL mesh as vtkPolyData.
-        """
-        return self.geometry_mapper.GetInput()
-
-    @geometry.setter
-    def geometry(self, new_geometry: vtkPolyData) -> None:
-        """
-        Updates the STL mesh displayed to a new one.
-        """
-        normals = vtkPolyDataNormals()
-        normals.ComputePointNormalsOn()
-        normals.SplittingOff()
-        normals.SetInputData(new_geometry)
-        new_geometry = smooth_normals(normals.GetOutputPort())
-
-        curvatures = numpy_to_vtk(zeros(new_geometry.GetNumberOfPoints()))
-        curvatures.SetName(CURVATURE_TYPE)
-        new_geometry.GetPointData().AddArray(curvatures)
-
-        weighted_curvatures = numpy_to_vtk(zeros(new_geometry.GetNumberOfPoints()))
-        weighted_curvatures.SetName(WEIGHTED_CURVATURE_TYPE)
-        new_geometry.GetPointData().AddArray(weighted_curvatures)
-
-        self.geometry_mapper.SetInputData(new_geometry)
-        self.geometry_mapper.SetScalarVisibility(False)
-
-        self.renderer.ResetCamera()
+    def render(self) -> None:
         self.vtk_widget.GetRenderWindow().Render()
 
-        self.reset_points()
-
-    @property
-    def points(self) -> None:
-        """
-        Return the landmarks of the currently loaded STL mesh as vtkPolyData.
-        The set of landmarks returned depends on the currently selected PointMode.
-        """
-        return self._points[self.current_mode.value]
-
-    @property
-    def point_mapper(self) -> None:
-        """
-        Return the data mapper currently connected to the landmarks of the currently
-        loaded STL mesh. The mapper returned depends on the currently selected PointMode.
-        """
-        return self._point_mappers[self.current_mode.value]
-
-    @property
-    def normals(self) -> vtkDataArray:
-        """
-        Return the normals to the landmakrs of the currently loaded STL mesh as vtkDataArray.
-        The set of normals returned depends on the currently selected PointMode.
-        """
-        return self.points.GetPointData().GetNormals()
-
-    @property
-    def curvatures(self) -> vtkDataArray:
-        return self.points.GetPointData().GetAbstractArray(CURVATURE_TYPE)
-
-    @property
-    def weighted_curvatures(self) -> None:
-        return self.points.GetPointData().GetAbstractArray(WEIGHTED_CURVATURE_TYPE)
-
-    @property
-    def current_mode(self) -> PointMode:
-        """
-        Return the mode currently active in the UI.
-        """
-        return self._current_mode
-
-    @current_mode.setter
-    def current_mode(self, new_mode: PointMode) -> None:
-        """
-        Set new PointMode to 'new_mode'. The change results in a re-coloring of the previously
-        active point set and the point set active after the mode switch.
-        """
-        self.point_actor.GetProperty().SetColor(0.5, 0.5, 0.5)
-        self.point_actor.GetProperty().SetPointSize(9.9)
-        self._current_mode = new_mode
-        self.point_actor.GetProperty().SetColor(1.0, 0.0, 0.0)
-        self.point_actor.GetProperty().SetPointSize(10)
-
-    @property
-    def point_actor(self) -> vtkActor:
-        """
-        Return the visual actor connected to to the landmarks of the currently loaded STL mesh.
-        The vtkActor returned depends on the currently selected PointMode.
-        """
-        return self._point_actors[self.current_mode.value]
-
-    @property
-    def text(self) -> str:
-        """
-        Return the text displayed in the upper left corner.
-        """
-        return self.text_widget.GetTextActor().GetInput()
-
-    @text.setter
-    def text(self, new_text: str) -> None:
-        def animate(that_text):
-            head = ""
-            pause = 0.001 / len(new_text)
-            for l in that_text:
-                head = head + l
-                self.text_widget.GetTextActor().SetInput(head)
-                sleep(pause)
-                self.vtk_widget.Render()
-
-        Timer(0.0, lambda: animate(new_text)).start()
-
-    def _setup_window(self) -> None:
-        """
-        Setup UI and connections for this program.
-        """
+    def _setup_ui(self):
         self.setWindowTitle("Landmark Marker")
         self.resize(800, 600)
         self.setAcceptDrops(True)
-        self.left_button_pressed = False
-        self.right_button_pressed = False
-        self.mouse_position = (-1, -1)
-        self._current_mode = PointMode.POI
+        central = QWidget()
 
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        # TODO: eventually adding interaction elements
+        self.setCentralWidget(central)
         self.vtk_widget = QVTKRenderWindowInteractor(self)
-        self.vtk_widget.keyReleaseEvent = self.keyReleaseEvent
-        layout = QVBoxLayout(central_widget)
+        layout = QVBoxLayout(central)
         layout.addWidget(self.vtk_widget)
-
-        self.poi_mode_button = QPushButton("POI Mode")
-        self.poi_mode_button.setCheckable(True)
-        self.poi_mode_button.setChecked(True)
-        self.poi_mode_button.clicked.connect(lambda: self.toggle_mode(self.poi_mode_button))
-        self.handle_mode_button = QPushButton("Scale Handle Mode")
-        self.handle_mode_button.setCheckable(True)
-        self.handle_mode_button.clicked.connect(lambda: self.toggle_mode(self.handle_mode_button))
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.poi_mode_button)
-        button_layout.addWidget(self.handle_mode_button)
-        layout.addLayout(button_layout)
 
         self.renderer = vtkRenderer()
         self.renderer.SetBackground(0.1, 0.2, 0.4)
         self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
+        self.vtk_widget.keyReleaseEvent = self.keyReleaseEvent
 
         self.text_widget = vtkTextWidget()
         self.text_widget.SetRepresentation(vtkTextRepresentation())
@@ -239,500 +309,162 @@ class MainWindow(QMainWindow):
         self.text_widget.SelectableOff()
         self.text_widget.ProcessEventsOff()
         self.text_widget.GetBorderRepresentation().SetShowBorderToOff()
-        self.text_widget.GetTextActor().SetInput("Drop STL file")
         self.text_widget.On()
+        self.text = "Drop STL file"
 
-        self.curvature_calculation = self.CurvatureCalculation()
-        self.thread = QThread()
-        self.curvature_calculation.moveToThread(self.thread)
-        self.curvature_calculation.curvatures.connect(self.update_curvatures)
-        self.start_curvature_calculation.connect(self.curvature_calculation.__call__)
-        self.thread.start()
+        self.mesh_mapper, _ = self.make_actor_mapper_pair()
+        self.mesh_mapper.SetScalarVisibility(False)
 
-    def _setup_vertex_picking(self):
-        """
-        Initializing everything that has to do with adding new landmarks to an STL mesh.
-        """
+        self.landmarks_mapper, landmarks_actor = self.make_actor_mapper_pair()
+        landmarks_property = landmarks_actor.GetProperty()
+        landmarks_property.SetPointSize(10)
+        landmarks_property.SetColor(0.5, 0.5, 0.5)
+        landmarks_property.RenderPointsAsSpheresOn()
+        self.landmarks_mapper.SetInputData(self.landmarks_manager.landmarks_representation)
+
+        self.poi_mapper, poi_actor = self.make_actor_mapper_pair()
+        poi_property = poi_actor.GetProperty()
+        poi_property.SetPointSize(10)
+        poi_property.SetColor(1.0, 0.5, 0.5)
+        poi_property.RenderPointsAsSpheresOn()
+        self.poi_mapper.SetInputData(self.poi_manager.landmarks_representation)
+
         picker = vtkCellPicker()
-        interactor: vtkRenderWindowInteractor = self.vtk_widget.GetRenderWindow().GetInteractor()
-        interactor.SetInteractorStyle(vtkInteractorStyleTrackballCamera())
+        interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
         interactor.SetPicker(picker)
-        interactor.AddObserver("LeftButtonPressEvent", lambda _, event: self.on_click(
-            event,
-            interactor,
-        ))
-        interactor.AddObserver("RightButtonPressEvent", lambda _, event: self.on_click(
-            event,
-            interactor,
-        ))
-        interactor.AddObserver(
-            "EndInteractionEvent",
-            lambda obj, _: self.on_release(obj, picker),
-        )
+        interactor.AddObserver(LEFT_BUTTON_PRESS_EVENT, self.on_event)
+        interactor.AddObserver(RIGHT_BUTTON_PRESS_EVENT, self.on_event)
+        interactor.AddObserver(END_INTERACTION_EVENT, self.on_event)
+        interactor.SetInteractorStyle(vtkInteractorStyleTrackballCamera())
 
-        self._points = []
-        self._point_mappers = []
-        self._point_actors = []
-        for _ in PointMode:
-            self._points.append(vtkPolyData())
-            self._points[-1].SetVerts(vtkCellArray())
-            self._points[-1].SetPoints(vtkPoints())
-            normals = vtkFloatArray()
-            normals.SetName("Normals")
-            normals.SetNumberOfComponents(3)
-            self._points[-1].GetPointData().SetNormals(normals)
+    @property
+    def text(self) -> str:
+        return self.text_widget.GetTextActor().GetInput()
 
-            curvatures = vtkFloatArray()
-            curvatures.SetName(CURVATURE_TYPE)
-            curvatures.SetNumberOfComponents(1)
-            self._points[-1].GetPointData().AddArray(curvatures)
+    @text.setter
+    def text(self, text: str) -> None:
+        def animate(that_text):
+            head = ""
+            pause = 0.001 / len(text)
+            for l in that_text:
+                head = head + l
+                self.text_widget.GetTextActor().SetInput(head)
+                sleep(pause)
+                self.vtk_widget.Render()
 
-            weighted_curvatures = vtkFloatArray()
-            weighted_curvatures.SetName(WEIGHTED_CURVATURE_TYPE)
-            weighted_curvatures.SetNumberOfComponents(1)
-            self._points[-1].GetPointData().AddArray(weighted_curvatures)
+        Timer(0.0, lambda: animate(text)).start()
 
-            self._point_mappers.append(vtkPolyDataMapper())
-            self._point_mappers[-1].SetInputData(self._points[-1])
-
-            self._point_actors.append(vtkActor())
-            self._point_actors[-1].SetMapper(self._point_mappers[-1])
-            self._point_actors[-1].GetProperty().SetPointSize(10)
-            self._point_actors[-1].GetProperty().SetColor(0.5, 0.5, 0.5)
-            self._point_actors[-1].GetProperty().RenderPointsAsSpheresOn()
-            self.renderer.AddActor(self._point_actors[-1])
-
-        self.current_mode = PointMode.POI
-        self.renderer.GetRenderWindow().Render()
-
-    def on_click(self, event: str, interactor: vtkRenderWindowInteractor) -> None:
-        """
-        Callback function to register left and right mouse button presses.
-
-        Keyword arguments:
-        event - name of the captured event.
-        interactor - interaction object, that captured this event.
-        """
-        if "Left" in event:
-            self.left_button_pressed = True
-        elif "Right" in event:
-            self.right_button_pressed = True
-        self.mouse_position = interactor.GetEventPosition()
-
-    def on_release(self, interactor: vtkRenderWindowInteractor, picker: vtkCellPicker) -> None:
-        """
-        Callback function to handle button clicks.
-
-        Keyword arguments:
-        interactor - interaction object, that captured the click.
-        picker - picker instance, to assign a click to an vtk object.
-        """
-        if self.geometry and self.mouse_position == interactor.GetEventPosition():
-            picker.Pick(*self.mouse_position, 0, self.renderer)
-
-            if self.left_button_pressed and picker.GetMapper() == self.geometry_mapper:
-                point_id = picker.GetPointId()
-                self.add_point(
-                    new_point=self.geometry.GetPoint(point_id),
-                    new_normal=self.geometry.GetPointData().GetNormals().GetTuple(point_id),
-                    new_curvature=self.geometry.GetPointData().GetAbstractArray(CURVATURE_TYPE).GetTuple(point_id),
-                    new_weighted_curvature= \
-                        self.geometry.GetPointData().GetAbstractArray(WEIGHTED_CURVATURE_TYPE).GetTuple(point_id),
-                )
-            elif self.right_button_pressed                  \
-                and self.points.GetNumberOfPoints() > 0     \
-            :
-                position = picker.GetPickPosition()
-                self.points.BuildPointLocator()
-                id_to_delete = self.points.GetPointLocator().FindClosestPoint(position)
-                self.remove_point(id_to_delete)
-
-        self.left_button_pressed = False
-        self.right_button_pressed = False
-
-    def add_point(
-        self,
-        new_point: Tuple[float, float, float],
-        new_normal: Tuple[float, float, float],
-        new_curvature: float,
-        new_weighted_curvature: float,
-    ) -> None:
-        """
-        Insert a new point to the current set of points. The expanded point set depends on the
-        currently selected PointMode. New points are stored immediately in a CSV file.
-
-        Keyword arguments:
-        new_point - 3D coordinates of a landmark point.
-        new_normal - 3D normal vector associated with new landmark point.
-        """
-        new_point_id = self.points.GetPoints().InsertNextPoint(new_point)
-        self.points.GetPointData().GetNormals().InsertTuple3(new_point_id, *new_normal)
-        self.points.GetPointData().GetAbstractArray(CURVATURE_TYPE).InsertTuple1(new_point_id, *new_curvature)
-        self.points.GetPointData().GetAbstractArray(WEIGHTED_CURVATURE_TYPE).InsertTuple1(
-            new_point_id, *new_curvature
-        )
-        self.points.GetVerts().InsertNextCell(1)
-        self.points.GetVerts().InsertCellPoint(new_point_id)
-        self.points.GetVerts().Modified()
-        self.points.GetPoints().Modified()
-        self.points.Modified()
-        self.points.BuildCells()
-        self.points.BuildLinks()
-        self.point_mapper.Update()
-        self.renderer.GetRenderWindow().Render()
-        self.write()
-
-    def remove_point(self, point_id: int) -> None:
-        """
-        Delete point with ID 'point_id' from the current set of points. The referenced point set
-        depends on the currently selected PointMode. The updated points are stored immediately in a
-        CSV file.
-
-        Keyword arguments:
-        point_id - ID of the point to be deleted as stored in the vtkPolyData currently selected.
-                   The ID must reference an existing point.
-        """
-        self.set_points(
-            new_points=[
-                self.points.GetPoint(id_)
-                for id_ in range(self.points.GetNumberOfPoints())
-                if id_ != point_id
-            ],
-            new_normals=[
-                self.normals.GetTuple(id_)
-                for id_ in range(self.normals.GetNumberOfTuples())
-                if id_ != point_id
-            ],
-            new_curvatures=[
-                self.curvatures.GetTuple1(id_)
-                for id_ in range(self.curvatures.GetNumberOfTuples())
-                if id_ != point_id
-            ],
-            new_weighted_curvatures=[
-                self.weighted_curvatures.GetTuple1(id_)
-                for id_ in range(self.curvatures.GetNumberOfTuples())
-                if id_ != point_id
-            ],
-        )
-        self.write()
-
-    def set_points(
-        self,
-        new_points: List[Tuple[float, float, float]],
-        new_normals: List[Tuple[float, float, float]],
-        new_curvatures: List[float],
-        new_weighted_curvatures: List[float],
-    ) -> None:
-        """
-        Assign a fresh list of 3D coordinates to the currently selected point set.
-        The currently active point set depends on the selected PointMode.
-
-        Keyword arguments:
-        new_points - list of 3-tuples filled with floating point numbers, representing 3D
-                     coordinates.
-        new_normals - list of 3-tuples filled with floating point numbers, representing 3D
-                      normal vectors for 'new_points' in order.
-        """
-        points = vtkPoints()
-        verts = vtkCellArray()
-        normals = vtkFloatArray()
-        normals.SetName("Normals")
-        normals.SetNumberOfComponents(3)
-        curvatures = vtkFloatArray()
-        curvatures.SetName(CURVATURE_TYPE)
-        curvatures.SetNumberOfTuples(1)
-        weighted_curvatures = vtkFloatArray()
-        weighted_curvatures.SetName(WEIGHTED_CURVATURE_TYPE)
-        weighted_curvatures.SetNumberOfComponents(1)
-        for (
-            point, normal, curvature, weighted_curvature,
-        )in zip(
-            new_points, new_normals, new_curvatures, new_weighted_curvatures
+    def on_event(self, interactor: vtkRenderWindowInteractor, event: str) -> None:
+        if (
+            event == END_INTERACTION_EVENT
+            and self.mouse_position == interactor.GetEventPosition()
         ):
-            point_id = points.InsertNextPoint(point)
-            normals.InsertTuple(point_id, normal)
-            curvatures.InsertTuple1(point_id, curvature)
-            weighted_curvatures.InsertTuple1(point_id, weighted_curvature)
-            verts.InsertNextCell(1)
-            verts.InsertCellPoint(point_id)
-        self.points.SetPoints(points)
-        self.points.SetVerts(verts)
-        self.points.GetPoints().Modified()
-        self.points.GetVerts().Modified()
-        self.points.Modified()
-        self.points.GetPointData().SetNormals(normals)
-        self.points.GetPointData().AddArray(curvatures)
-        self.points.GetPointData().AddArray(weighted_curvatures)
-        self.points.Modified()
-        self.points.BuildCells()
-        self.points.BuildLinks()
-        self.point_mapper.Update()
-        self.renderer.GetRenderWindow().Render()
+            if self.latest_event == LEFT_BUTTON_PRESS_EVENT:
+                self.pick(interactor)
+            elif self.latest_event == RIGHT_BUTTON_PRESS_EVENT:
+                self.unpick(interactor)
 
-    def write(self, auto_prompt: bool=True) -> None:
-        """
-        Write point sets for all PointModes in a CSV file.
-        The CSV file will have the same file name as the previously loaded STL mesh file, but
-        with a '.csv' extension as postfix.
+        self.mouse_position = interactor.GetEventPosition()
+        self.latest_event = event
 
-        'L1.stl' -> 'L1.stl.csv'
-        """
-        previous_mode = self.current_mode
-        with open(self.filename + ".csv", "w", encoding="utf-8") as point_file:
-            csv = DictWriter(point_file, POINTS_HEADER)
-            csv.writeheader()
-            for mode in PointMode:
-                self.current_mode = mode
-                for id_ in range(self.points.GetNumberOfPoints()):
-                    row = dict(zip(
-                        POINTS_HEADER,
-                        self.points.GetPoint(id_)                    \
-                            + self.normals.GetTuple(id_)             \
-                            + self.curvatures.GetTuple(id_)          \
-                            + self.weighted_curvatures.GetTuple(id_) \
-                            + (mode.name,),
-                    ))
-                    csv.writerow(row)
-        if auto_prompt:
-            self.text = f"Written to '{basename(self.filename) + '.csv'}'"
-        self.current_mode = previous_mode
+    def pick(self, interactor: vtkRenderWindowInteractor) -> None:
+        picker = interactor.GetPicker()
+        position = interactor.GetEventPosition()
 
-    def read(self) -> bool:
-        """
-        Read all point sets for all PointModes from a CSV file.
-        The CSV file should have the same file name as the previously loaded STL mesh file, but
-        with a '.csv' extension as postfix.
+        picker.Pick(*position, 0, self.renderer)
+        if picker.GetMapper() is not self.mesh_mapper:
+            return
+        landmark = Landmark.at(picker.GetPointId(), mesh=self.mesh, mode=PointMode.POI)
+        self.poi_manager.add(landmark)
+        self.update_landmarks(write=True)
 
-        'L1.stl' -> 'L1.stl.csv'
-        """
-        filename = f"{self.filename}.csv"
-        if not isfile(filename):
-            return False
+    def unpick(self, interactor: vtkRenderWindowInteractor) -> None:
+        picker = interactor.GetPicker()
+        position = interactor.GetEventPosition()
 
-        previous_mode = self.current_mode
-        for mode in PointMode:
-            self.current_mode = mode
-            points, normals, curvatures, weighted_curvatures = load_markers(filename, mode)
-            self.set_points(points, normals, curvatures, weighted_curvatures)
-        self.current_mode = previous_mode
-        self.renderer.GetRenderWindow().Render()
-        return True
+        picker.Pick(*position, 0, self.renderer)
+        self.poi_manager.remove_by_location(picker.GetPickPosition())
+        self.update_landmarks(write=True)
 
-    def reset_points(self) -> None:
-        previous_mode = self.current_mode
-        for mode in PointMode:
-            self.current_mode = mode
-            self.set_points([], [], [], [])
-        self.current_mode = previous_mode
-        self.renderer.GetRenderWindow().Render()
-
-    def append_points(
-        self,
-        new_points: List[Tuple[float, float, float]],
-        new_normals: List[Tuple[float, float, float]],
-        new_curvatures: List[float],
-        new_weighted_curvatures: List[float],
-    ) -> None:
-        """
-        Add a list of 3D coordinates to the currently selected point set.
-        The currently active point set depends on the selected PointMode.
-
-        Keyword arguments:
-        new_points - list of 3-tuples filled with floating point numbers, representing 3D
-        coordinates.
-        new_normals - list of 3-tuples filled with floating point numbers, representing 3D
-                      normal vectors for 'new_points' in order.
-        """
-        old_points = [self.points.GetPoint(id_) for id_ in range(self.points.GetNumberOfPoints())]
-        old_normals = [self.normals.GetTuple(id_) for id_ in range(self.points.GetNumberOfPoints())]
-        old_curvatures = [
-            self.curvatures.GetTuple1(id_) for id_ in range(self.points.GetNumberOfPoints())
-        ]
-        old_weighted_curvatures = [
-            self.weighted_curvatures.GetTuple1(id_)
-            for id_ in range(self.points.GetNumberOfPoints())
-        ]
-
-        self.set_points(
-            old_points + new_points,
-            old_normals + new_normals,
-            old_curvatures + new_curvatures,
-            old_weighted_curvatures + new_weighted_curvatures,
+    def update_landmarks(self, write: bool=False) -> None:
+        self.poi_mapper.Update()
+        self.landmarks_mapper.Update()
+        self.render()
+        if not write:
+            return
+        save_landmarks(
+            self.landmarks_manager.landmarks + self.poi_manager.landmarks,
+            self.path,
         )
+        self.text = f"New landmarks at '{self.path.stem}.csv'"
 
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None: # pylint: disable=invalid-name
-        """
-        Just reject drag'n'drop actions, not involving files.
+    def make_actor_mapper_pair(self) -> vtkPolyDataMapper:
+        new_mapper = vtkPolyDataMapper()
+        new_actor = vtkActor()
+        new_actor.SetMapper(new_mapper)
+        self.renderer.AddActor(new_actor)
+        return new_mapper, new_actor
 
-        Keyword arguments:
-        event - object containing more information about the event instantiation.
-        """
+    def load_geometry(self, path: Path) -> None:
+        # cleanup
+        self.landmarks_manager.set_all([])
+        self.poi_manager.set_all([])
+
+        # load geometry
+        self.path = path
+        self.mesh = load_geometry(self.path)
+        self.mesh_mapper.SetInputData(self.mesh)
+
+        # load landmarks
+        existing_landmarks = load_landmarks(self.path)
+        if existing_landmarks:
+            self.landmarks_manager.set_all(
+                [l for l in existing_landmarks if l.mode is PointMode.SCALE_HANDLE]
+            )
+            self.poi_manager.set_all([l for l in existing_landmarks if l.mode is PointMode.POI])
+            self.text = f"Now inspecting '{self.path.name}'"
+        else:
+            self.text = "Generating new landmarks..."
+            def update(landmarks):
+                self.landmarks_manager.set_all(landmarks)
+                self.poi_manager.update(self.mesh)
+                self.update_landmarks(write=True)
+            worker = CurvatureWorker(self.mesh)
+            worker.finished.connect(update)
+            worker.start()
+
+        self.update_landmarks()
+        self.renderer.ResetCamera()
+        self.render()
+
+    def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
             event.accept()
         else:
             event.ignore()
 
-    def dropEvent(self, event: QDropEvent): # pylint: disable=invalid-name
-        """
-        Load mesh from file or points from .mrk.json file. If you are importing from json, make sure
-        the file conforms to the structure in place in 3D slices Markup point fiducial export files.
+    def dropEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if not urls:
+            return
 
-        Keyword arguments:
-        event - object containing more information about the event instantiation.
-        """
-        if event.mimeData().hasUrls():
-            filename, *_ = event.mimeData().urls()
-            filename = filename.path()
-            if filename.endswith(".stl"):
-                self.filename = filename
-                self.geometry = load_stl(filename)
-                exists_offline_data = self.read()
-                if not exists_offline_data:
-                    self.text = "Generating auto-landmarks..."
-                    self.start_curvature_calculation.emit(self.geometry)
-                else:
-                    self.text = f"Loaded {self.geometry.GetNumberOfPoints()} vertices."
-                event.accept()
-            elif filename.endswith(".mrk.json"):
-                regex = Regex(r"""\"position\":\s*\[([^,]+),\s*([^,]+),\s*([^,]+)],""")
-                with open(filename, "r", encoding="utf-8") as markups_file:
-                    json = "".join(markups_file.readlines())
-                positions = [(float(x), float(y), float(z),) for x, y, z in regex.findall(json)]
-                normals = [
-                    self.geometry.GetPointData().GetNormals().GetTuple(
-                        self.geometry.GetPointLocator().FindClosestPoint(position)
-                    )
-                    for position in positions
-                ]
-                curvatures = [
-                    self.geometry.GetPointData().GetAbstractArray(CURVATURE_TYPE).GetTuple(
-                        self.geometry.GetPointLocator().FindClosesPoint(position)
-                    )
-                    for position in positions
-                ]
-                weighted_curvatures = [
-                    self.geometry.GetPointData().GetAbstractArray(WEIGHTED_CURVATURE_TYPE).GetTuple(
-                        self.geometry.GetPointLocator().FindClosesPoint(position)
-                    )
-                    for position in positions
-                ]
-                self.append_points(
-                    new_points=positions, new_normals=normals, new_curvatures=curvatures, new_weighted_curvatures=weighted_curvatures
-                )
-                event.accept()
-            else:
-                event.ignore()
-        else:
-            event.ignore()
+        path = Path(urls[0].toLocalFile())
+        if path.suffix == ".stl":
+            self.load_geometry(path)
+        elif "".join(path.suffixes) == ".mrk.json":
+            def update(_):
+                self.poi_manager.update(self.mesh)
+                self.update_landmarks(write=True)
 
-    class CurvatureCalculation(QObject):
-        curvatures = pyqtSignal(tuple)
+            self.poi_manager.set_all(load_landmarks(path))
+            self.update_landmarks()
+            self.worker = CurvatureWorker(self.mesh)
+            self.worker.finished.connect(update)
+            self.worker.start()
 
-        @pyqtSlot(object)
-        def __call__(self, geometry: vtkPolyData) -> None:
-            mask, weighted_curvatures, curvatures = calculate_curved_sections(geometry)
-            significant = n_greatest_values(
-                curvatures, n=int(geometry.GetNumberOfPoints() / 2)
-            )
-
-            mask = [
-                mask.GetTuple1(n) == 1 and significant.GetTuple1(n)
-                for n in range(geometry.GetNumberOfPoints())
-            ]
-            self.curvatures.emit((mask, weighted_curvatures, curvatures,))
-
-    @pyqtSlot(tuple)
-    def update_curvatures(self, curvatures: Tuple[List[bool], vtkFloatArray, vtkFloatArray]) -> None:
-        # add all curvatures to geometry
-        mask, weighted_curvatures, curvatures = curvatures
-        curvatures = numpy_to_vtk(curvatures)
-        curvatures.SetName(CURVATURE_TYPE)
-        self.geometry.GetPointData().AddArray(curvatures)
-        weighted_curvatures = numpy_to_vtk(weighted_curvatures)
-        weighted_curvatures.SetName(WEIGHTED_CURVATURE_TYPE)
-        self.geometry.GetPointData().AddArray(weighted_curvatures)
-
-        # collect all geometry info for landmarks
-        (
-            new_points, new_normals, new_curvatures, new_weighted_curvatures,
-        ) = [], [], [], []
-        for point_id, flag in enumerate(mask):
-            if not flag:
-                continue
-            new_points.append(self.geometry.GetPoint(point_id))
-            new_normals.append(self.geometry.GetPointData().GetNormals().GetTuple(point_id))
-            new_curvatures.append(curvatures.GetTuple1(point_id))
-            new_weighted_curvatures.append(weighted_curvatures.GetTuple1(point_id))
-
-        # add landmark points to the data representation
-        previous_mode = self.current_mode
-        self.current_mode = PointMode.SCALE_HANDLE
-        self.set_points(new_points, new_normals, new_curvatures, new_weighted_curvatures)
-        self.current_mode = previous_mode
-        self.write(auto_prompt=False)
-        self.text = "Generated auto-landmarks"
-
-    def keyReleaseEvent(self, event: QKeyEvent): # pylint: disable=invalid-name
-        """
-        Hard coded keybindings and there actions.
-        """
-        if event.key() == Qt.Key_S and not self.geometry is None:
-            if self.geometry_mapper.GetScalarVisibility():
-                self.geometry_mapper.SetScalarVisibility(False)
-                self.renderer.GetRenderWindow().Render()
-                return
-
-            (
-                mask, weighted_curvatures, mean_curvatures,
-            ) = calculate_curved_sections(self.geometry)
-            scalars = n_greatest_values(
-                mean_curvatures, n=int(self.geometry.GetNumberOfPoints() / 2)
-            )
-
-            scalars = numpy_to_vtk(multiply(vtk_to_numpy(mask), vtk_to_numpy(scalars)))
-            scalars.SetName("ColorGroups")
-            self.geometry.GetPointData().SetScalars(scalars)
-
-            lookup_table = vtkLookupTable()
-            lookup_table.SetNumberOfTableValues(2)
-            lookup_table.Build()
-            lookup_table.SetTableValue(0,  0.9, 0.9, 0.9)
-            lookup_table.SetTableValue(1,  1.0, 0.0, 0.0)
-
-            self.geometry_mapper.SetScalarRange(0, 1)
-            self.geometry_mapper.SetLookupTable(lookup_table)
-            self.geometry_mapper.SetScalarVisibility(True)
-            self.renderer.GetRenderWindow().Render()
-        elif event.key() == Qt.Key_D and not self.geometry is None:
-            # Here is just some random stuff for debugging and displaying
-            # WIP data.
-            self.geometry = remesh(self.geometry, cluster_count=2000)
-        elif event.key() == Qt.Key_Q:
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key_Q:
             self.close()
-
-    def toggle_mode(self, caller: QPushButton):
-        """
-        Switch between the PointModes on a button click.
-
-        Keyword argument:
-        caller - the Qt button, that invoked this callback.
-        """
-        if (
-            caller is self.poi_mode_button and self.poi_mode_button.isChecked()
-        ) or (
-            caller is self.handle_mode_button
-            and not self.handle_mode_button.isChecked()
-        ):
-            self.handle_mode_button.setChecked(False)
-            self.poi_mode_button.setChecked(True)
-            self.current_mode = PointMode.POI
-            self.text = "POI Mode"
-        else:
-            self.handle_mode_button.setChecked(True)
-            self.poi_mode_button.setChecked(False)
-            self.current_mode = PointMode.SCALE_HANDLE
-            self.text = "Scale Handle Mode"
-        self.renderer.GetRenderWindow().Render()
 
 if __name__ == "__main__":
     app = QApplication([])

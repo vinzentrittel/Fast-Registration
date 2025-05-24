@@ -168,6 +168,7 @@ def _calculate_weighted_curvatures(geometry: vtkPolyData) -> vtkDoubleArray:
     curvatures.SetCurvatureTypeToMean()
     curvatures.Update()
     geometry.GetPointData().SetScalars(curvatures.GetOutput().GetPointData().GetScalars(CURVATURE_TYPE))
+    geometry.GetPointData().AddArray(curvatures.GetOutput().GetPointData().GetScalars(CURVATURE_TYPE))
     return numpy_to_vtk(_calculate_distance_weighted_curvature(curvatures.GetOutput()))
 
 def _find_winner_in_grid_sections(
@@ -189,7 +190,7 @@ def _find_winner_in_grid_sections(
         maximum_curvature_id = argmax(curvature)
         point_candidates.append(voxel.GetPoint(maximum_curvature_id))
 
-    maximum_curvature_locations = unique(point_candidates, axis=1)
+    maximum_curvature_locations = unique(point_candidates, axis=0)
     maximum_curvature_point_ids = list(set(
         locator.FindClosestPoint(l) for l in maximum_curvature_locations
     ))
