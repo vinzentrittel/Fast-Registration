@@ -1,8 +1,10 @@
 # generate_derivative.py
 # Aufruf in Blender via: blender --background --python generate_derivative.py -- --input in.stl --output out.stl --seed 42
+from pathlib import Path
 
 import bpy, bmesh, argparse, random, math
 from mathutils import Vector, Matrix, noise
+from numpy import array
 
 def parse_args():
     import sys
@@ -10,7 +12,6 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--input",  required=True, help="Pfad zur Atlas-STL")
     p.add_argument("--output", required=True, help="Pfad zur Ausgabedatei")
-    p.add_argument("--seed",   type=int, default=0, help="Zufallsseed (z.B. Durchlaufindex)")
     return p.parse_args(argv)
 
 def clear_scene():
@@ -22,60 +23,42 @@ def load_mesh(path):
     obj = bpy.context.selected_objects[0]
     return obj
 
-def bbox_max_extent(obj):
-    # Weltkoordinaten aller Eckpunkte des Bounding-Box
-    corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
-    xs = [c.x for c in corners]
-    ys = [c.y for c in corners]
-    zs = [c.z for c in corners]
-    return max(max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs))
+def create_lattice(mesh):
+    bpy.ops.object.add(type="LATTICE")
+    obj = bpy.context.selected_objects[0]
+    #matrix = Matrix.LocRotScale(Vector(mesh.location), None, Vector(mesh.dimensions))
+    #obj.data.transform(matrix)
+    return obj
 
-def apply_multifreq_noise(obj, max_disp, seed):
-    # Rauschen auf 4 Oktaven, Lacunarity=2, Gain=0.5
-    random.seed(seed)
-    me = obj.data
-    bm = bmesh.new(); bm.from_mesh(me)
-    base_freq = 1.0
-    octaves = 2
-    lacunarity = 2.0
-    gain = 0.5
+def setup_modifier(mesh, lattice):
+    lattice.select_set(False)
+    mesh.select_set(True)
+    mod = mesh.modifiers.new("Lattice", "LATTICE")
+    mod.object = lattice
 
-    for v in bm.verts:
-        p = v.co.copy()
-        amp = 1.0
-        freq = base_freq
-        n_total = 0.0
-        for iteration in range(octaves):
-            if iteration != 0:
-                n_total += noise.noise(p * freq) * amp
-            freq *= lacunarity
-            amp  *= gain
-        disp = n_total * max_disp
-        v.co += v.normal * disp
+def lattice_modification_generator(lattice, relative_offsets=(-0.1, 0.0, 0.1)):
+    lattice.data.points[0].select = True
+    relative_offsets = -0.25, 0, 0.25
+    scale = array([
+        lattice.dimensions[0],
+        lattice.dimensions[1],
+        lattice.dimensions[2],
+    ])
 
-    bm.to_mesh(me)
-    bm.free()
-
-def apply_linear_transform(obj, seed):
-    random.seed(seed)
-    # Skalierung
-    sx = random.uniform(0.75, 1.25)
-    sy = random.uniform(0.75, 1.25)
-    sz = random.uniform(0.75, 1.25)
-    S = Matrix.Diagonal((sx, sy, sz, 1.0))
-    # Rotation um X, Y, Z
-    rx = random.uniform(0, 2*math.pi)
-    ry = random.uniform(0, 2*math.pi)
-    rz = random.uniform(0, 2*math.pi)
-    R = Matrix.Rotation(rx, 4, 'X') @ Matrix.Rotation(ry, 4, 'Y') @ Matrix.Rotation(rz, 4, 'Z')
-    # Translation
-    tx = random.uniform(-5, 5)
-    ty = random.uniform(-5, 5)
-    tz = random.uniform(-5, 5)
-    T = Matrix.Translation(Vector((tx, ty, tz)))
-    # Gesamte Transformation M = S · R · T
-    M = S @ R @ T
-    obj.matrix_world = M
+    for point in lattice.data.points:
+        point.select = True
+        tmp = point.co_deform
+        for offset in [
+            array((x, y, z,))
+            for x in relative_offsets
+            for y in relative_offsets
+            for z in relative_offsets
+        ]:
+            point.co_deform = Vector(array(point.co_deform) + offset)
+            yield
+        point.co_deform = tmp
+        point.select = False
+    bpy.ops.object.mode_set(mode="EDIT")
 
 def export_mesh(obj, path):
     bpy.ops.object.select_all(action='DESELECT')
@@ -85,16 +68,13 @@ def export_mesh(obj, path):
 def main():
     args = parse_args()
     clear_scene()
-    obj = load_mesh(args.input)
+    mesh = load_mesh(args.input)
+    lattice = create_lattice(mesh)
+    setup_modifier(mesh, lattice)
+    for n, _ in enumerate(lattice_modification_generator(lattice)):
+        export_mesh(mesh, str(Path(args.output, f"derivative_{n:04d}.stl")))
 
-    # Bestimme maximale Breite für das Displacement-Limit
-    extent = bbox_max_extent(obj)
-    max_disp = 0.1 * extent
-
-    apply_multifreq_noise(obj, max_disp, args.seed)
-    apply_linear_transform(obj, args.seed)
-    export_mesh(obj, args.output)
+    return
 
 if __name__ == "__main__":
     main()
-
