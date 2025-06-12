@@ -429,9 +429,9 @@ class MainWindow(QMainWindow):
                 self.landmarks_manager.set_all(landmarks)
                 self.poi_manager.update(self.mesh)
                 self.update_landmarks(write=True)
-            worker = CurvatureWorker(self.mesh)
-            worker.finished.connect(update)
-            worker.start()
+            self.worker = CurvatureWorker(self.mesh)
+            self.worker.finished.connect(update)
+            self.worker.start()
 
         self.update_landmarks()
         self.renderer.ResetCamera()
