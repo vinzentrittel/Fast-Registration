@@ -70,6 +70,7 @@ def register(
     transform_filter.SetInputData(point_set)
     transform_filter.Update()
     #Slic3rPointRepresentable.write_from([transform_filter.GetOutput().GetPoint(n) for n in range(transform_filter.GetOutput().GetNumberOfPoints())], "output.mrk.json")
+    return [transform_filter.GetOutput().GetPoint(n) for n in range(transform_filter.GetOutput().GetNumberOfPoints())]
 
 def dubious(geometry: vtkPolyData) -> bool:
     original_bounds = geometry.GetBounds()
@@ -88,12 +89,13 @@ if __name__ == "__main__":
         landmark_normals,
         landmark_curvatures,
         landmark_weighted_curvatures,
-    ) = load_markers(f"{argv[2]}.csv", PointMode.SCALE_HANDLE)
-    source_pois, *_ = load_markers(f"{argv[2]}.csv", PointMode.POI)
-    register(
+    ) = load_markers(f"{argv[2][:-4]}.csv", PointMode.SCALE_HANDLE)
+    source_pois, *_ = load_markers(f"{argv[2][:-4]}.csv", PointMode.POI)
+    result = register(
         source=load_stl(argv[2]),
         target=load_stl(argv[1]),
         landmarks=array(landmarks),
         landmark_normals=array(landmark_normals),
         source_pois=array(source_pois),
     )
+    Slic3rPointRepresentable.write_from(result, f"{argv[1][:-4]}.mrk.json")
