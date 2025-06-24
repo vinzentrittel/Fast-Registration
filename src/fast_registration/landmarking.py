@@ -144,41 +144,31 @@ def move_to_surface(landmarks: ndarray, target: vtkPolyData) -> ndarray:
                 should be trivially corrected to reside on the surface.
     target - VTK surface mesh, where the landmarks should ideally reside on.
     """
-    target_normals = vtkPolyDataNormals()
-    target_normals.ComputeCellNormalsOn()
-    target_normals.ComputePointNormalsOff()
-    target_normals.SplittingOff()
-    target_normals.SetInputData(target)
-    target_normals.Update()
-    target = target_normals.GetOutput()
-    cell_normals = vtk_to_numpy(target.GetCellData().GetNormals())
-
     target.BuildLocator()
     target.BuildCellLocator()
     target_locator = target.GetCellLocator()
 
     surface_points = []
-    estimate_surface_point = [0.0, 0.0, 0.0]
-    surface_cell_id = mutable(0)
-    distance2 = mutable(0.0)
+    cell = vtkGenericCell()
     for landmark in landmarks:
         target_locator.FindClosestPoint(
             landmark,
-            estimate_surface_point,
-            vtkGenericCell(),
-            surface_cell_id,
+            [0.0, 0.0, 0.0],
+            cell,
             mutable(0),
-            distance2,
+            mutable(0),
+            mutable(0.0),
         )
-
-        direction = cell_normals[surface_cell_id]
-        distance = sqrt(distance2)
-        p1 = landmark - distance * direction
-        p2 = landmark + distance * direction
-
-        x = [0.0, 0.0, 0.0]
-        target_locator.IntersectWithLine(p1, p2, 0.0001, mutable(0), x, [0,0,0], mutable(0))
-        surface_points.append(x)
+        closest_point = [0.0, 0.0, 0.0]
+        cell.EvaluatePosition(
+            landmark,
+            closest_point,
+            mutable(0),
+            [0.0, 0.0, 0.0],
+            mutable(0.0),
+            [0.0] * cell.GetNumberOfPoints(),
+        )
+        surface_points.append(closest_point)
 
     return array(surface_points)
 
