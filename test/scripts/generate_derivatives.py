@@ -38,12 +38,6 @@ def setup_modifier(mesh, lattice):
 
 def lattice_modification_generator(lattice, relative_offsets=(-0.1, 0.0, 0.1)):
     lattice.data.points[0].select = True
-    relative_offsets = -0.25, 0, 0.25
-    scale = array([
-        lattice.dimensions[0],
-        lattice.dimensions[1],
-        lattice.dimensions[2],
-    ])
 
     for point in lattice.data.points:
         point.select = True
@@ -54,8 +48,10 @@ def lattice_modification_generator(lattice, relative_offsets=(-0.1, 0.0, 0.1)):
             for y in relative_offsets
             for z in relative_offsets
         ]:
+            tmp = Vector(array(point.co_deform))
             point.co_deform = Vector(array(point.co_deform) + offset)
             yield
+            point.co_deform = tmp
         point.co_deform = tmp
         point.select = False
     bpy.ops.object.mode_set(mode="EDIT")
@@ -71,7 +67,7 @@ def main():
     mesh = load_mesh(args.input)
     lattice = create_lattice(mesh)
     setup_modifier(mesh, lattice)
-    for n, _ in enumerate(lattice_modification_generator(lattice)):
+    for n, _ in enumerate(lattice_modification_generator(lattice, relative_offsets=(-0.5, 0, 0.5,))):
         export_mesh(mesh, str(Path(args.output, f"derivative_{n:04d}.stl")))
 
     return
