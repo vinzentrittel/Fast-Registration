@@ -12,7 +12,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--input",  required=True, help="Pfad zur Atlas-STL")
     p.add_argument("--output", required=True, help="Pfad zur Ausgabedatei")
-    p.add_argument("--magnitude", required=False, type=int, default=0.2, help="Magnitude of alteration (default=0.2)")
+    p.add_argument("--magnitude", required=False, type=float, default=0.2, help="Magnitude of alteration (default=0.2)")
     return p.parse_args(argv)
 
 def clear_scene():
