@@ -67,10 +67,8 @@ def main():
     mesh = load_mesh(args.input)
     lattice = create_lattice(mesh)
     setup_modifier(mesh, lattice)
-    for n, _ in enumerate(lattice_modification_generator(lattice, relative_offsets=(-0.5, 0, 0.5,))):
+    for n, _ in enumerate(lattice_modification_generator(lattice, relative_offsets=(-0.2, 0, 0.2,))):
         export_mesh(mesh, str(Path(args.output, f"derivative_{n:04d}.stl")))
-
-    return
 
 if __name__ == "__main__":
     main()
